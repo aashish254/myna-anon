@@ -180,6 +180,16 @@ carries the whole verification battery this section rests on — suite, registry
 secret scan, live engine and the uploader's own dry run — with each figure as its instrument
 printed it.
 
+**It has now run for real.** [huggingface.co/anonymous/myna-v6](https://huggingface.co/anonymous/myna-v6)
+is public, and the Hub's own per-file sizes sum to **1,799,177,588 B** — every one of the 10 manifest
+files matches byte for byte, next to the generated card. Two things only the real run could show: the
+namespace is the Hugging Face username **`anonymous`**, capitalised, and `create_repo` answers
+`403 … rights to create a model under the namespace "anonymous"` for the GitHub handle the brief
+quoted; and the card's `datasets:` frontmatter cited a Hub dataset that answers 401 under either
+spelling, because the frozen suite is `data/decision-v2-pilot/` committed in this repository. Both are
+fixed in the script, so `MynaV6("anonymous/myna-v6")` is the documented load path and the card it
+ships names a source that exists.
+
 ## Quickstart: install, fetch the weights, ask one question
 
 ```bash

@@ -97,8 +97,7 @@ def model_card(root: Path) -> str:
     fm = ["---", "license: apache-2.0", "library_name: transformers",
           "base_model: microsoft/deberta-v3-large", "base_model_size: model_size",
           "tags:", "- text-classification", "- zero-shot", "- decision-making", "- agent",
-          "- conformal-prediction", "- calibrated", "model_name: myna-v6-unified",
-          "datasets:", "- anonymous/decision-v2-pilot", "---"]
+          "- conformal-prediction", "- calibrated", "model_name: myna-v6-unified", "---"]
 
     lines = fm + ["", "# Myna v6 Unified", "",
                   "A fine-tuned `microsoft/deberta-v3-large` encoder with a "
@@ -191,7 +190,9 @@ def model_card(root: Path) -> str:
               "- `myna-v6-unified.pt` — the readout heads, `config`, and the dev/test/calibration "
               "audit blocks the published tables quote",
               "- `myna-v5-unified.pt` — the v5 checkpoint, before the set-aware head",
-              "- `witness-*.json` — the artifacts behind every number above", "",
+              "- `witness-*.json` — the artifacts behind every number above",
+              "- the frozen suite every cell is scored on is `data/decision-v2-pilot/` in the "
+              "`myna` source repository; it is committed there, not published as a Hub dataset", "",
               "The training code and the Colab notebooks are not in this weight repo; they "
               "live in the `myna` source repository, and the campaign ran on a Tesla T4.", ""]
     return "\n".join(lines)
