@@ -1,9 +1,11 @@
 W1102 23:50:40.882000 30706 .venv/lib/python3.13/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-/repo/next ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+/repo ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
   warnings.warn(
 $ python -m bench.risk_coverage --ckpt 'myna-v5-prototype 2' --split test --source banking77,dbpedia14,trec --out runs/risk_coverage_v6_g5trio_test.md
 test: 348 rows / 348 questions over 190 question-sets — pooled over banking77,dbpedia14,trec only
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 11412.59it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 11412.59it/s]
 checkpoint myna-v5-prototype 2: 446.63M params, temperature {'choice': 0.9, 'score': 0.9, 'noul': 0.85}, abstain_below=None (curve applies its own floor)
 
 risk / coverage — myna-v5-prototype 2 on test (348 questions)
@@ -27,7 +29,9 @@ dbpedia14              116     0.957      0.914      0.981
 trec                   116     0.948      0.862      0.990
 
 G5 (§2.2): accuracy >= 0.95 at coverage >= 0.60: PASS — best coverage at target: 0.701 · max accuracy on this curve: 1.0
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12777.32it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12777.32it/s]
 
 floor 0.903 re-run on the engine: it abstained on 104 of 348 questions, the curve puts 104 below that floor (coverage 0.701)
 wrote runs/risk_coverage_v6_g5trio_test.md and runs/risk_coverage_v6_g5trio_test.json

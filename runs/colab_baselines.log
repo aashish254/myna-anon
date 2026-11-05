@@ -1,10 +1,12 @@
 train 57904 rows | test 1176 rows | device mps
 === in-domain baseline, seed 42 ===
 W1104 18:05:34.856000 7492 torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-/repo/next ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+/repo ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
   warnings.warn(
 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 5298.12it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 5298.12it/s]
 [transformers] [1mDebertaV2Model LOAD REPORT[0m from: microsoft/deberta-v3-large
 Key                                     | Status     |  | 
 ----------------------------------------+------------+--+-
@@ -44,5 +46,5 @@ Notes:
   epoch 1 step 4000/4613 (25296s)
   epoch 1 step 4200/4613 (26073s)
   epoch 1 step 4400/4613 (26900s)
-/repo/.local/share/uv/python/cpython-3.13.14-macos-aarch64-none/lib/python3.13/multiprocessing/resource_tracker.py:479: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-krmvbs98'}
+/repo UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-krmvbs98'}
   warnings.warn(

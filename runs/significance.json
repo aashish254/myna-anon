@@ -18,7 +18,7 @@
   "dump": "runs/laya_0419_test.rowoutcomes.json",
   "version": "0.4.19",
   "commit": "55a19f7b7b56787e1a3e41063def9bb9a8737351",
-  "path": "/repo/github contribution /GIT/laya-scan-0419"
+  "path": "/repo contribution /GIT/laya-scan-0419"
  },
  "laya_warnings": [
   "RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated."

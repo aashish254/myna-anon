@@ -1,9 +1,11 @@
 W1102 23:16:48.756000 18761 .venv/lib/python3.13/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-/repo/next ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+/repo ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
   warnings.warn(
 $ python -m bench.risk_coverage --ckpt 'myna-v5-prototype 2' --split calibration --out runs/risk_coverage_v6.md
 calibration: 448 rows / 568 questions over 168 question-sets
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 10714.61it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 10714.61it/s]
 checkpoint myna-v5-prototype 2: 446.63M params, temperature {'choice': 0.9, 'score': 0.9, 'noul': 0.85}, abstain_below=None (curve applies its own floor)
 
 risk / coverage — myna-v5-prototype 2 on calibration (568 questions)
@@ -35,7 +37,9 @@ trec                    40     0.925      0.850      0.971
 yelp                    80     0.775      0.500      0.950
 
 G5 (§2.2): accuracy >= 0.95 at coverage >= 0.60: PASS — best coverage at target: 0.6 · max accuracy on this curve: 1.0
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12797.82it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12797.82it/s]
 
 floor 0.884 re-run on the engine: it abstained on 227 of 568 questions, the curve puts 227 below that floor (coverage 0.600)
 wrote runs/risk_coverage_v6.md and runs/risk_coverage_v6.json

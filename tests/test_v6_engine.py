@@ -319,7 +319,7 @@ def test_v6_dispatch_is_by_contents_and_never_by_repo_id(tmp_path):
     assert is_v6_directory(tmp_path) is True
 
     # A `user/repo` id is not detected: it is indistinguishable from `runs/myna-v0`.
-    assert is_v6_source("anonymous/myna-v6") is False
+    assert is_v6_source("anonymous254/myna-v6") is False
     assert is_v6_source(tmp_path) is True
     assert is_v6_source(tmp_path / "nope") is False
 
@@ -363,7 +363,7 @@ def test_the_upload_command_dry_runs_and_adds_up(tmp_path):
     import subprocess
 
     r = subprocess.run([sys.executable, "scripts/upload_to_hf.py", "--repo-id",
-                        "anonymous/myna-v6", "--dry-run"],
+                        "anonymous254/myna-v6", "--dry-run"],
                        capture_output=True, text=True, cwd=REPO)
     assert r.returncode == 0, r.stderr[-600:]
     assert "dry run: nothing uploaded." in r.stdout, r.stdout[-400:]

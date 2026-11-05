@@ -1,0 +1,33 @@
+{
+ "description": "Campaign notebooks released 2026-11-04: three v5 copies and the v6 campaign. The v6 notebook contains the CAL split, the temperature/conformal fit, and the checkpoint assembly.",
+ "notebooks": [
+  {
+   "file": "01-v5-campaign-full.ipynb",
+   "original_name": "Another copy of Untitled0.ipynb",
+   "sha256": "04473b6202a909776e715c1afb3820587a00c38420ce43ac7ddebe5fa118b37c",
+   "cells": 33,
+   "note": "Complete v5 campaign: config, bundle loader, example builder, graph head, training loop, evaluation, witness JSON, backbone export, dev temperature fit, banking77 per-option head (v1 and v2), hybrid audit, graph ablation, and the myna-v5-unified.pt merge."
+  },
+  {
+   "file": "02-v5-campaign-no-merge.ipynb",
+   "original_name": "Copy of Untitled0 (2).ipynb",
+   "sha256": "8f8d18a1464c222425b220d0a33737acc2cfe35d8439dc0cb43b821c4396f40b",
+   "cells": 27,
+   "note": "Same campaign without the six merge/verification cells (27-32) and with one empty cell; every other cell is byte-identical to the full copy."
+  },
+  {
+   "file": "03-v5-campaign-cells-1-12.ipynb",
+   "original_name": "Untitled0 (1).ipynb",
+   "sha256": "ccb07b573fc4e978de4580198eb3b94a234ff5196985382213f5b8ba2e6e5d05",
+   "cells": 12,
+   "note": "First twelve cells of the full copy, ending at the backbone export; a truncated copy, no unique cell."
+  },
+  {
+   "file": "04-v6-campaign.ipynb",
+   "original_name": "Untitled0 (2).ipynb",
+   "sha256": "023f3c51d7a1477d57c3f0e62a6150fb739b0fccce35012fa162d3155831a9a9",
+   "cells": 7,
+   "note": "The v6 campaign: dedup + stratified train/CAL/dev/test split (CAL drawn from train, seed 42), set-context head and none gate for banking77, CORAL/EMD ordinal head with a dev gate, the 4-arm graph ablation, the CAL-split temperature and conformal fit, and the cell that writes myna-v6-unified.pt."
+  }
+ ]
+}

@@ -1,5 +1,5 @@
 cmd: anti_prior_audit.py --compare --out runs/anti_prior_audit.json
-suite: /repo/next ko ne next gen model/data/decision-v2-pilot/train.jsonl sha256 5f5f93ff7ca03e45  57904 rows in 17112 question sets
+suite: /repo ko ne next gen model/data/decision-v2-pilot/train.jsonl sha256 5f5f93ff7ca03e45  57904 rows in 17112 question sets
 dose per arm: 3600 updates x 8 sets x batch 10 at 2048 cells/forward, seed 0
 
 cells at or above skew 0.55: 6 of 16 — agnews/is_business 0.7545, agnews/is_sports 0.7483, agnews/is_scitech 0.7467, agnews/is_world 0.7390, boolq/answer 0.6243, yelp/recommend 0.6055

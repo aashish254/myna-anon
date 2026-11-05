@@ -1,6 +1,6 @@
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.14, pytest-9.1.1, pluggy-1.6.0
-rootdir: /repo/next ko ne next gen model
+rootdir: /repo ko ne next gen model
 configfile: pyproject.toml
 plugins: anyio-4.15.1
 collected 67 items
@@ -16,7 +16,7 @@ _______________ test_readme_carries_the_generated_block_verbatim _______________
 >       assert G.readme_block() in text, (
             "README's release-gate block drifted from `bench/gates.py --readme-block`")
 E       AssertionError: README's release-gate block drifted from `bench/gates.py --readme-block`
-E       assert '<!-- gates:release:begin -->\n## Where this stands: the release gate, all seven rows\n\n**3 of 7 met, 4 not met, 0 op...me and 1 is `KAGGLE`. That is TODO 8b, which stays unticked for exactly this reason. |\n\n<!-- gates:release:end -->\n' in '# Myna\n\n**The decision engine that never re-reads.** Typed `choice` / `score` / `noul`\ndecisions over growing obse....24).\n\nApache-2.0 · research log in [PLAN.md](PLAN.md) · questions to\n[anonymous](https://github.com/anonymous)\n'
+E       assert '<!-- gates:release:begin -->\n## Where this stands: the release gate, all seven rows\n\n**3 of 7 met, 4 not met, 0 op...me and 1 is `KAGGLE`. That is TODO 8b, which stays unticked for exactly this reason. |\n\n<!-- gates:release:end -->\n' in '# Myna\n\n**The decision engine that never re-reads.** Typed `choice` / `score` / `noul`\ndecisions over growing obse....24).\n\nApache-2.0 · research log in [PLAN.md](PLAN.md) · questions to\n[anonymous254](https://github.com/anonymous/myna'
 E        +  where '<!-- gates:release:begin -->\n## Where this stands: the release gate, all seven rows\n\n**3 of 7 met, 4 not met, 0 op...me and 1 is `KAGGLE`. That is TODO 8b, which stays unticked for exactly this reason. |\n\n<!-- gates:release:end -->\n' = <function readme_block at 0x1091d7f60>()
 E        +    where <function readme_block at 0x1091d7f60> = G.readme_block
 

@@ -1,7 +1,7 @@
 $ gh release download antiprior_off_s0-weights -D /tmp/ckpt-05339
 $ ls -l /tmp/ckpt-05339
--rw-r--r--@ 1 Anonymous  wheel  67733781 Oct  1 20:11 model.pt
--rw-r--r--@ 1 Anonymous  wheel    526662 Oct  1 20:11 tokenizer.json
+-rw-r--r--@ 1 anonymous  wheel  67733781 Oct  1 20:11 model.pt
+-rw-r--r--@ 1 anonymous  wheel    526662 Oct  1 20:11 tokenizer.json
 $ shasum -a 256 /tmp/ckpt-05339/*
 30f0fa937e57e8ce8b21c58315dc7e800151a0c95e003dc0930e0f75d588f1e5  /tmp/ckpt-05339/model.pt
 0252c24627eeebc2df5a577576c1c8b24e402da015c1d45519e7e1d8541ffdc3  /tmp/ckpt-05339/tokenizer.json

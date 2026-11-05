@@ -4,8 +4,8 @@ set -u
 cd "$(dirname "$0")/../.." || exit 1
 T1="$HOME/.myna_kaggle_token"
 T2="$HOME/.myna_kaggle_token2"
-OLD=anonymous/myna-baseline-6ep-s21
-NEW=Anonymousanonymous124/myna-baseline-6ep-s21-b
+OLD=anonymouskumaranonymous01/myna-baseline-6ep-s21
+NEW=anonymousanonymous124/myna-baseline-6ep-s21-b
 LOG=runs/conv6.log
 say() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 

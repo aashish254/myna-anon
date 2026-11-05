@@ -1,8 +1,12 @@
 $ PYTHONPATH='<laya checkout>' <laya venv python> bench/eval_laya_row_outcomes.py --out runs/laya_0419_test.rowoutcomes.json
-laya 0.4.19 at /repo/github contribution /GIT/laya-scan-0419 commit 55a19f7b7b56 · python 3.14.4 torch 2.14.0
-Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2693.84it/s]
+laya 0.4.19 at /repo contribution /GIT/laya-scan-0419 commit 55a19f7b7b56 · python 3.14.4 torch 2.14.0
+
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]
+Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2693.84it/s]
   laya warned: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
-Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2923.67it/s]
+
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]
+Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2923.67it/s]
   100 rows in 39s (391 ms/row, 0 unanswered)
   200 rows in 68s (340 ms/row, 0 unanswered)
   300 rows in 95s (316 ms/row, 0 unanswered)

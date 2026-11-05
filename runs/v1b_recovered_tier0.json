@@ -137,7 +137,7 @@
       "swap-state": 0.4875
     }
   },
-  "cmd": "'/repo/next ko ne next gen model/.venv/bin/python' bench/diag_question_ablation.py --run-dir runs/v1b-kaggle-3600b --tokenizer runs/v1b-kaggle-3600b/tokenizer.json --metrics runs/v1b_kaggle_3600b.metrics.json --out runs/v1b_recovered_tier0.json",
+  "cmd": "'/repo ko ne next gen model/.venv/bin/python' bench/diag_question_ablation.py --run-dir runs/v1b-kaggle-3600b --tokenizer runs/v1b-kaggle-3600b/tokenizer.json --metrics runs/v1b_kaggle_3600b.metrics.json --out runs/v1b_recovered_tier0.json",
   "coverage": {
     "as-scored": {
       "instructions_changed": 0,

@@ -172,7 +172,7 @@ GATES = [
          "`none_absent` is 0/12 here against the campaign's 7/12, because the open-set gate is "
          "reconstructed from tensor shapes with no training code in the tree (§9.68). (v) **The "
          "checkpoint is not in git**: `runs/` carries every witness these rows quote, and the "
-         "1.799 GB the commands load is the public Hub repo `anonymous/myna-v6` (§9.68(ix)), so "
+         "1.799 GB the commands load is the public Hub repo `anonymous254/myna-v6` (§9.68(ix)), so "
          "a clean checkout re-runs none of them without that download. What the verdict "
          "does *not* settle is dose — that question belonged to `v1b-kaggle-3600b`, whose "
          "tail slope §9.38 writes down; v6's checkpoint came from a Colab campaign whose notebook "

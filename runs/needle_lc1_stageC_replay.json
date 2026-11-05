@@ -1,6 +1,6 @@
 {
-  "cmd": "python bench/eval_needle.py --ckpt /repo/.cache/myna/lc1-4k-s0-stageC-weights --device cpu --n 60 --seed 0 --lengths 128 1024 4096 8192 16384 --out /tmp/myna-stageC-replay/needle_replay.md",
-  "ckpt": "/repo/.cache/myna/lc1-4k-s0-stageC-weights",
+  "cmd": "python bench/eval_needle.py --ckpt /repo --device cpu --n 60 --seed 0 --lengths 128 1024 4096 8192 16384 --out /tmp/myna-stageC-replay/needle_replay.md",
+  "ckpt": "/repo",
   "device": "cpu",
   "seed": 0,
   "n_per_length": 60,

@@ -18,7 +18,7 @@
   "version": "0.15.0",
   "package_sha256": "daaa84b1fa864909",
   "reader": "Qwen3.5-0.8B",
-  "checkpoint_dir": "/repo/.cache/huggingface/hub/models--nandakishorm--vega-U/snapshots/4d2050287982ca7a7bb0c22fd19a389f5f94474e",
+  "checkpoint_dir": "/repo",
   "device": "cpu",
   "mode": "engine",
   "views": 1,

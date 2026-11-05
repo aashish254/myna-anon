@@ -1,6 +1,6 @@
 {
-  "cmd": "python bench/eval_needle.py --ckpt /repo/myna-staging/lc1-4k-s0/stageA --device cpu --n 60 --seed 0 --lengths 128 1024 --out /repo/myna-staging/lc1-4k-s0/stageA/needle_stageA.md",
-  "ckpt": "/repo/myna-staging/lc1-4k-s0/stageA",
+  "cmd": "python bench/eval_needle.py --ckpt /repo --device cpu --n 60 --seed 0 --lengths 128 1024 --out /repo",
+  "ckpt": "/repo",
   "device": "cpu",
   "seed": 0,
   "n_per_length": 60,

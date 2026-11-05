@@ -8,7 +8,7 @@
   "reps": 20,
   "questions": 2,
   "argv": [
-    "/repo/next ko ne next gen model/bench/bench_mlx.py",
+    "/repo ko ne next gen model/bench/bench_mlx.py",
     "--ckpt",
     "runs/myna-v0",
     "--reps",

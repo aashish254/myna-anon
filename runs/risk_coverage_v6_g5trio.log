@@ -1,9 +1,11 @@
 W1102 23:29:34.715000 25181 .venv/lib/python3.13/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-/repo/next ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+/repo ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
   warnings.warn(
 $ python -m bench.risk_coverage --ckpt 'myna-v5-prototype 2' --split calibration --source banking77,dbpedia14,trec --out runs/risk_coverage_v6_g5trio.md
 calibration: 120 rows / 120 questions over 42 question-sets — pooled over banking77,dbpedia14,trec only
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 7763.80it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 7763.80it/s]
 checkpoint myna-v5-prototype 2: 446.63M params, temperature {'choice': 0.9, 'score': 0.9, 'noul': 0.85}, abstain_below=None (curve applies its own floor)
 
 risk / coverage — myna-v5-prototype 2 on calibration (120 questions)
@@ -27,7 +29,9 @@ dbpedia14               40     1.000      0.975      1.000
 trec                    40     0.925      0.875      0.971
 
 G5 (§2.2): accuracy >= 0.95 at coverage >= 0.60: PASS — best coverage at target: 0.8 · max accuracy on this curve: 1.0
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12300.47it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 12300.47it/s]
 
 floor 0.852 re-run on the engine: it abstained on 24 of 120 questions, the curve puts 24 below that floor (coverage 0.800)
 wrote runs/risk_coverage_v6_g5trio.md and runs/risk_coverage_v6_g5trio.json

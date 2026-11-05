@@ -1,7 +1,9 @@
 W1104 14:32:20.387000 2590 .venv/lib/python3.13/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-/repo/next ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+/repo ko ne next gen model/.venv/lib/python3.13/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
   warnings.warn(
-Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]Loading weights: 100%|██████████| 390/390 [00:00<00:00, 14551.77it/s]
+
+Loading weights:   0%|          | 0/390 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 390/390 [00:00<00:00, 14551.77it/s]
 1176 bundles from test | engine myna-v6-unified (DeBERTa-v3-large + SetAwareBankingHead + CORAL Ordinal + Conformal G5)
   100 bundles, 342s
   200 bundles, 391s

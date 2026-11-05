@@ -28,6 +28,6 @@ run() {  # $1 dir, $2 ref, $3 seed, $4 out_json
     rm -rf "/tmp/out_$3"
 }
 
-run a3ep    anonymous/myna-baseline-3ep-s21  21 runs/baseline_seed21_3ep.json
-run bseed27 anonymous/myna-baseline-2ep-s27  27 runs/baseline_seed27_2ep.json
+run a3ep    anonymouskumaranonymous01/myna-baseline-3ep-s21  21 runs/baseline_seed21_3ep.json
+run bseed27 anonymouskumaranonymous01/myna-baseline-2ep-s27  27 runs/baseline_seed27_2ep.json
 say "overnight done"

@@ -48,8 +48,8 @@ Successfully built myna-0.1.0.tar.gz and myna-0.1.0-py3-none-any.whl
   # into ~/Library/Python/3.9 — that is a mutation this runbook made to the machine, reported in step 3.
 
 $ ls -la dist/
--rw-r--r--@ 1 Anonymous  staff  95902 Oct  2 02:47 myna-0.1.0-py3-none-any.whl
--rw-r--r--@ 1 Anonymous  staff  86155 Oct  2 02:47 myna-0.1.0.tar.gz
+-rw-r--r--@ 1 anonymous  staff  95902 Oct  2 02:47 myna-0.1.0-py3-none-any.whl
+-rw-r--r--@ 1 anonymous  staff  86155 Oct  2 02:47 myna-0.1.0.tar.gz
 
 $ unzip -l dist/*.whl | grep -iE "\.pt$|secret|token|key"
      4031  01-01-1980 00:00   myna/tokenizer.py
@@ -69,7 +69,7 @@ $ unzip -l dist/*.whl | tail   # every entry, for the record
 
 $ sha256 dist/myna-0.1.0-py3-none-any.whl
 0a09390662ab22bb2499338cd23c2f1cd6e1f66c2d9f487b30ad22895fed7537
-  # byte-identical to the wheel pip built from git+https://github.com/anonymous/myna.git at fe11db6
+  # byte-identical to the wheel pip built from git+https://github.com/anonymous/myna at fe11db6
   # (runs/quickstart_from_public_install.log). Same bytes two ways: the index would ship nothing the
   # git URL does not already ship.
 
@@ -90,8 +90,8 @@ Metadata-Version: 2.3
 Name: myna
 Version: 0.1.0
 Summary: Myna: a persistent-state, delta-encoded System-1 decision engine.
-Author: Anonymous
-Author-email: Anonymous <145881415+anonymous@users.noreply.github.com>
+Author: anonymous
+Author-email: anonymous <145881415+anonymous254@users.noreply.github.com>
 Requires-Python: >=3.11
 Requires-Dist: torch>=2.6 / numpy>=2.0 / tokenizers>=0.20 / pyarrow>=18.0 / tqdm>=4.66
 Provides-Extra: bench browser dev mlx serve
@@ -110,7 +110,7 @@ claim + this witness. pyproject.toml is now sha256
 classifiers, [project.urls], and a [tool.uv.build-backend] module-name pin).
 
 $ python3 -m build          # FIRST ATTEMPT, before the module-name pin existed
-  × Failed to build /repo/next ko ne next gen model
+  × Failed to build /repo ko ne next gen model
   ╰─▶ Expected a Python module at: src/myna_engine/__init__.py
   # uv_build infers the module from the DISTRIBUTION name. Renaming the dist would have broken the
   # build outright, and nothing in the repo would have told us until someone ran `build`. Hence:
@@ -205,9 +205,9 @@ WHETHER THE ARTIFACT HASH REPRODUCES, STATED RATHER THAN GLOSSED:
 THE IMPORT PATH, PROVEN FROM THE INSTALL RATHER THAN FROM THE SOURCE TREE:
 
 $ uv sync --extra browser
- ~ myna-engine==0.1.0 (from file:///repo/next%20ko%20ne%20next%20gen%20model)
+ ~ myna-engine==0.1.0 (from file:///repo
 $ .venv/bin/python -c "import myna, importlib.metadata as md; print(myna.__file__, md.metadata('myna-engine')['License-Expression'])"
-/repo/next ko ne next gen model/src/myna/__init__.py Apache-2.0
+/repo ko ne next gen model/src/myna/__init__.py Apache-2.0
 $ uv lock --check
 Resolved 77 packages in 2ms                 # exit 0
 $ ls .venv/bin | grep myna
@@ -255,7 +255,7 @@ THE TORCH PATCH VERSION MY REBUILD CHANGED, CHECKED INSTEAD OF ASSUMED:
   from the repo with the renamed editable install:
 
 $ .venv/bin/python    # the README's five quickstart lines, verbatim
-  myna module -> /repo/next ko ne next gen model/src/myna/__init__.py
+  myna module -> /repo ko ne next gen model/src/myna/__init__.py
   dist        -> 0.1.0 torch 2.14.0
   params 16926848 temperature 1.5
   choice 'billing'

@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-REPO = "anonymous/myna"
+REPO = "anonymous254/myna"
 ASSETS = ("model.pt", "tokenizer.json")
 MANIFEST = "SHA256SUMS"
 # The arm the repo currently quotes: `antiprior-off-macro` in bench/reproduce.py.

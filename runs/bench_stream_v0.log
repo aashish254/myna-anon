@@ -10,8 +10,10 @@ retained state per observation: 576 KiB (n_layers x heads x dk x dv, fixed — a
         16384 |           28.85 |       6904.02 |   239.3x
 
 short-state avg: myna-stream 32.53 ms, myna-full 48.09 ms, speedup 1.48x
-Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 5065.58it/s]
-/repo/github contribution /GIT/laya/laya/router.py:295: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
+
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]
+Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 5065.58it/s]
+/repo contribution /GIT/laya/laya/router.py:295: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
   agent = Agent(repo, **kwargs)
 laya          avg   127.78 ms/request
 

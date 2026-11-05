@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None):
     except ImportError:
         raise SystemExit(
             "myna-serve needs the serve extra. Installed from git: "
-            'pip install "myna[serve] @ git+https://github.com/anonymous/myna.git". '
+            'pip install "myna[serve] @ git+https://github.com/anonymous/myna". '
             "In this checkout: uv sync --extra serve.")
 
     myna = Myna(args.ckpt, device=args.device, abstain_below=args.abstain_below)

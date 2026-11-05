@@ -1,9 +1,9 @@
 {
- "cmd": "PYTHONPATH='/repo/github contribution /GIT/laya-scan-0419' '/repo/github contribution /GIT/laya/.venv/bin/python' bench/eval_laya_row_outcomes.py --out runs/laya_0419_test.rowoutcomes.json",
+ "cmd": "PYTHONPATH='/repo contribution /GIT/laya-scan-0419' '/repo contribution /GIT/laya/.venv/bin/python' bench/eval_laya_row_outcomes.py --out runs/laya_0419_test.rowoutcomes.json",
  "engine": "laya",
  "laya": {
   "version": "0.4.19",
-  "path": "/repo/github contribution /GIT/laya-scan-0419",
+  "path": "/repo contribution /GIT/laya-scan-0419",
   "commit": "55a19f7b7b56787e1a3e41063def9bb9a8737351",
   "init_sha256": "f7703a43682a5ed6",
   "python": "3.14.4",

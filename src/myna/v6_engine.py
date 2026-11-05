@@ -1,7 +1,7 @@
 """Myna v6 Unified: a fine-tuned DeBERTa-v3-large backbone with a cardinality-routed readout.
 
     myna = MynaV6("myna-v5-prototype 2")          # a local campaign directory
-    myna = MynaV6("anonymous/myna-v6")           # the same files from the Hub
+    myna = MynaV6("anonymous254/myna-v6")           # the same files from the Hub
     myna.predict(state, questions)                 # typed answers, as engine.py
 
 The checkpoint (`myna-v6-unified.pt`) holds four readout heads, a `config` dict and the
@@ -263,7 +263,7 @@ class Observation:
 class MynaV6:
     """The v6 engine: DeBERTa-v3-large encoder, cardinality-routed scoring, conformal gate."""
 
-    def __init__(self, source: str | Path = "anonymous/myna-v6", device: str = "cpu",
+    def __init__(self, source: str | Path = "anonymous254/myna-v6", device: str = "cpu",
                  abstain_below: float | None = None, max_length: int = 512):
         if abstain_below is not None and not 0.0 < float(abstain_below) <= 1.0:
             raise ValueError(f"--abstain-below must be in (0, 1], got {abstain_below!r}")

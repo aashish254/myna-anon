@@ -336,7 +336,7 @@ def test_weights_never_land_inside_the_package(tmp_path, monkeypatch):
 
 def test_default_tag_and_repo_are_the_ones_the_registry_quotes():
     assert W.DEFAULT_TAG == "antiprior_off_s0-weights"
-    assert W.REPO == "anonymous/myna"
+    assert W.REPO == "anonymous254/myna"
 
 
 def test_a_fetched_checkpoint_loads_and_answers_a_typed_question(tmp_path, monkeypatch,

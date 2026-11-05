@@ -9,7 +9,7 @@ SCRIPT = base64.b64decode("IiIiSW4tZG9tYWluIGZpbmUtdHVuZWQgRGVCRVJUYSBiYXNlbGluZ
 open("/kaggle/working/colab_baselines.py", "w").write(SCRIPT)
 
 subprocess.run(["git", "clone", "--depth", "1",
-                "https://github.com/anonymous/myna.git", "/kaggle/working/myna"], check=True)
+                "https://github.com/anonymous/myna", "/kaggle/working/myna"], check=True)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                 "sentencepiece", "tiktoken", "accelerate", "transformers>=4.40"], check=True)
 

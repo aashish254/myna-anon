@@ -23,8 +23,8 @@ Output is a suite-shaped directory that `myna.train --suite` consumes unchanged:
 `datasets` is a data-prep dependency, not a myna runtime one, so run this under an
 env that has it (kev's own venv) with kev importable:
 
-  cd "/repo/next ko ne next gen model" && \
-  KEV_ROOT="/repo/github contribution /GIT/kev" \
+  cd "/repo ko ne next gen model" && \
+  KEV_ROOT="/repo contribution /GIT/kev" \
     "$KEV_ROOT/.venv/bin/python" -m bench.pull_upstream --per-source 5000
 
   --per-source 5            smoke run: same code path, tiny slice
@@ -42,7 +42,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-DEFAULT_SUITE = "/repo/github contribution /GIT/kev/evals/decision-v2"
+DEFAULT_SUITE = "/repo contribution /GIT/kev/evals/decision-v2"
 
 
 def import_kev(kev_root):

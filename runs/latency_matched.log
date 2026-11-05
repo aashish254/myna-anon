@@ -1,7 +1,7 @@
 == 0. load: one process, both engines ==
-/repo/github contribution /GIT/laya/laya/agent.py:1178: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
+/repo contribution /GIT/laya/laya/agent.py:1178: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
   return Agent(model_id_or_path, device=device, token=token, subfolder=subfolder, fast=fast,
-laya 0.3.20 from /repo/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851/typed-decisions in 1.5s: max_len=1024 head_max_len=256 421.3M params, weights torch.float32, amp=False autocast_dtype=torch.float32
+laya 0.3.20 from /repo in 1.5s: max_len=1024 head_max_len=256 421.3M params, weights torch.float32, amp=False autocast_dtype=torch.float32
 myna 14.45M params, weights torch.float32, device cpu
 
 == 1. matched calls: same str state, same dict of questions ==

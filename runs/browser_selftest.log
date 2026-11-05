@@ -1,5 +1,5 @@
 
-profile      /repo/next ko ne next gen model/runs/onnx
+profile      /repo ko ne next gen model/runs/onnx
              chunk 256 x tile 16, 8 questions x 64 tokens, 6 layers, temperature 3
 cold load    248 ms  (both graphs, one weights.bin mount)
 transfer     59.32 MiB across 6 files

@@ -3,7 +3,7 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 export KAGGLE_API_TOKEN="$(cat "$HOME/.myna_kaggle_token")"
-REF=anonymous/myna-baseline-3ep-s7
+REF=anonymouskumaranonymous01/myna-baseline-3ep-s7
 LOG=runs/overnight.log
 say() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 

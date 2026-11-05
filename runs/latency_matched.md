@@ -2,7 +2,7 @@
 
 - One process, direct calls, [1, 5, 10, 50] questions, state = the laya bench ticket (87 myna tokens); threads intra 8, inter 1; warmup 3, reps 10.
 - myna `runs/myna-v0`, 14.45M params, weights torch.float32.
-- laya 0.3.20 `/repo/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851/typed-decisions`, 421.29M params, `Agent.system_one`, max_len 1024, head_max_len 256, weights torch.float32, autocast off (torch.float32).
+- laya 0.3.20 `/repo 421.29M params, `Agent.system_one`, max_len 1024, head_max_len 256, weights torch.float32, autocast off (torch.float32).
 
 ## p50, same box, same process, same inputs
 | questions | laya_system_one_p50_ms | myna_predict_p50_ms | speedup_e2e | myna_ask_only_p50_ms | speedup_stream |

@@ -57,7 +57,7 @@
         "--seed": "0",
         "--steps": "250",
         "--stop-factor": "3.0",
-        "--suite": "/repo/next ko ne next gen model/data/decision-v2-pilot",
+        "--suite": "/repo ko ne next gen model/data/decision-v2-pilot",
         "--vocab": "8192",
         "--warm-start": "/tmp/kgwork/final/runs/v1b-kaggle-3600b/model.pt"
       },
@@ -128,7 +128,7 @@
         "--seed": "1",
         "--steps": "250",
         "--stop-factor": "3.0",
-        "--suite": "/repo/next ko ne next gen model/data/decision-v2-pilot",
+        "--suite": "/repo ko ne next gen model/data/decision-v2-pilot",
         "--vocab": "8192",
         "--warm-start": "/tmp/kgwork/final/runs/v1b-kaggle-3600b/model.pt"
       },
@@ -199,7 +199,7 @@
         "--seed": "0",
         "--steps": "250",
         "--stop-factor": "3.0",
-        "--suite": "/repo/next ko ne next gen model/data/decision-v2-pilot",
+        "--suite": "/repo ko ne next gen model/data/decision-v2-pilot",
         "--vocab": "8192",
         "--warm-start": "/tmp/kgwork/final/runs/v1b-kaggle-3600b/model.pt"
       },
@@ -270,7 +270,7 @@
         "--seed": "1",
         "--steps": "250",
         "--stop-factor": "3.0",
-        "--suite": "/repo/next ko ne next gen model/data/decision-v2-pilot",
+        "--suite": "/repo ko ne next gen model/data/decision-v2-pilot",
         "--vocab": "8192",
         "--warm-start": "/tmp/kgwork/final/runs/v1b-kaggle-3600b/model.pt"
       },

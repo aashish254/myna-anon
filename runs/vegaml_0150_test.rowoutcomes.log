@@ -1,9 +1,16 @@
-$ '/repo/.venvs/vegaml-0.15.0/bin/python' bench/eval_vegaml_row_outcomes.py --every 100 --out runs/vegaml_0150_test.rowoutcomes.json
-Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2156.90it/s]
-vegaml 0.15.0 at /repo/.venvs/vegaml-0.15.0/lib/python3.13/site-packages/vegaml · reader Qwen3.5-0.8B (1.75 GB) · ckpt 78f96be7c6a06abb · python 3.13.14 torch 2.15.0 transformers 5.22.1 · cpu threads=1 mode=engine views=1
-Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2820.27it/s]
+$ '/repo' bench/eval_vegaml_row_outcomes.py --every 100 --out runs/vegaml_0150_test.rowoutcomes.json
+
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]
+Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2156.90it/s]
+vegaml 0.15.0 at /repo · reader Qwen3.5-0.8B (1.75 GB) · ckpt 78f96be7c6a06abb · python 3.13.14 torch 2.15.0 transformers 5.22.1 · cpu threads=1 mode=engine views=1
+
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]
+Fetching 5 files: 100%|██████████| 5/5 [00:00<00:00, 2820.27it/s]
 W1101 23:30:06.534000 4754 torch/distributed/elastic/multiprocessing/redirects.py:35] NOTE: Redirects are currently not supported in MacOs.
-Loading weights:   0%|          | 0/320 [00:00<?, ?it/s]Loading weights:  69%|██████▉   | 220/320 [00:00<00:00, 2199.48it/s]Loading weights: 100%|██████████| 320/320 [00:00<00:00, 2194.46it/s]
+
+Loading weights:   0%|          | 0/320 [00:00<?, ?it/s]
+Loading weights:  69%|██████▉   | 220/320 [00:00<00:00, 2199.48it/s]
+Loading weights: 100%|██████████| 320/320 [00:00<00:00, 2194.46it/s]
 loaded: reader Qwen/Qwen3.5-0.8B at 752,393,024 params (torch.float32, 24 layers) · engine 14,342,512 trainable · warned 0
 [transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
 [transformers] `chunk_gated_delta_rule` is falling back to its reference PyTorch implementation because `flash-linear-attention` is not installed. This is correct but much slower; install `flash-linear-attention` for the optimized kernel.

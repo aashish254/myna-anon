@@ -1,5 +1,5 @@
 {
-  "derived_from": "/repo/github contribution /GIT/kev/evals/decision-v2",
+  "derived_from": "/repo contribution /GIT/kev/evals/decision-v2",
   "seed": 20260919,
   "converters": "kev.data.build + kev.contrastive.generate at the pinned suite above",
   "dataset_revisions": {

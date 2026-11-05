@@ -1,6 +1,6 @@
 # Needle recall vs context length — stageC_final
 
-`python bench/eval_needle.py --ckpt /repo/myna-staging/lc1-4k-s0/stageC_final --device cpu --n 60 --seed 0 --lengths 128 1024 4096 8192 16384 --out /repo/myna-staging/lc1-4k-s0/stageC_final/needle_stageC_final.md`
+`python bench/eval_needle.py --ckpt /repo --device cpu --n 60 --seed 0 --lengths 128 1024 4096 8192 16384 --out /repo
 
 60 needles per length, decisive sentence at a random position, seed 0 on `cpu`. Flat accuracy = the trunk still reads the whole observation. The `ms` column is a mean over these samples on a shared-core laptop, so it is not a G2 measurement: SPEC §9.23 quotes ratios from the matched harness, never absolutes like these.
 

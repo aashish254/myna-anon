@@ -28,7 +28,7 @@ needle recall vs context length — stageB_resume (cpu)
 uniform floor 0.167 (6 desks), 1 s.e. at n=60 is 0.048
 G4: NOT MEASURED here — the 128-token rung is at the 0.167 uniform floor, so this curve cannot be read as decay — the checkpoint does not answer this task at any length
 
-wrote /repo/myna-staging/lc1-4k-s0/stageB_resume/needle_stageB_resume.md and /repo/myna-staging/lc1-4k-s0/stageB_resume/needle_stageB_resume.json
+wrote /repo and /repo
 STAGE stageB_resume DONE
 
 ## state at the boundary

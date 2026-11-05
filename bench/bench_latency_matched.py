@@ -31,7 +31,7 @@ shape and non-degeneracy, because an engine that answered nothing would look
 fast.
 
 Usage (the laya checkout's directory name ends in a space — quote it):
-  PYTHONPATH="/repo/github contribution /GIT/laya" \\
+  PYTHONPATH="/repo contribution /GIT/laya" \\
     .venv/bin/python -m bench.bench_latency_matched --myna-ckpt runs/myna-v0
   .venv/bin/python -m bench.bench_latency_matched --no-laya   # myna half only
 """

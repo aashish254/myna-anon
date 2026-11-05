@@ -1,0 +1,5286 @@
+# Myna — Master Spec
+
+**Status:** authoritative. Supersedes [V2_SPEC.md](V2_SPEC.md) and [PLAN.md](PLAN.md) wherever
+their numbers conflict (see [§9 Corrections log](#9-corrections-log-things-we-previously-stated-wrong)).
+Every quantity below is tagged **measured** (reproducible from a committed artifact),
+**projected** (our estimate, falsifiable by a named experiment), or **gated** (needs access or
+approval we do not have yet).
+
+---
+
+## 1. Goal
+
+Build **myna**: an original System-1 typed-decision model that answers `choice` / `score` / `noul`
+questions over a growing observation in **one pass, at constant cost**, on hardware people
+actually own — a laptop, a phone tab, a browser.
+
+The one-sentence pitch:
+
+> A decision over a 16k-token document, in ~30 ms, in 16 MB of weights, with a probability you
+> can trust, on a machine with no network.
+
+### Why this is the right product
+The incumbent class of decision models (laya, and decoder-LM routers like kev) re-read the whole
+observation per request and operate inside a fixed attention window. That makes three real
+workloads expensive or impossible: agent loops that re-decide every turn, documents longer than
+the window, and on-device/browser deployment. Myna's architecture removes all three constraints at
+once: gated linear attention carries a **fixed-size matrix state** that is exactly continuable, so
+the observation is scanned once and then only appended to.
+
+### The bar we hold ourselves to
+Fast **and** accurate **and** deployable. Speed alone is not a contribution: a model that is quick
+and wrong is worse than slow and wrong, because it is cheap to deploy at scale. Accuracy is a gate
+to clear, not a gap to reframe around. Where we lose, we print the loss.
+
+---
+
+## 2. What "done" looks like — target results
+
+### 2.1 Headline table (the artifact the project ships)
+
+| axis | laya typed-decisions | myna target | label |
+|---|---|---|---|
+| parameters | **421,293,827 measured by us** at their pinned snapshot `55cf4c4e…` (`laya_params`, `bench/bench_latency_matched.py:350`, the same `sum(p.numel() … parameters())` expression Myna's count uses) — their card publishes only a rounded **≈421M total** (ModernBERT-large 395M + a decision head trained from scratch) and **no paper exists**, so the enc 394.78M / head 26.51M split is *our* arithmetic over that artifact's tensor header (421,293,830 across 206 tensors, minus the 3-value `temperature` registered as a buffer at `laya/common.py:600`); no witness here prints the split | **14.45M in the shipped v0 artifact** (`n_params` 14,449,280, `runs/bench_mlx_int8.json`), **15.35M** at the default `MynaConfig` (vocab 4096 vs v0's 1740) — the same count, two configs; ≤ 32M allowed | measured |
+| accuracy, kev decision-v2 **test** | **0.6319** (our own seeded witness, n=546) | **≥ 0.70** gate · 0.75 stretch | projected |
+| accuracy, their own typed-decisions bench | 0.766 (2,000 decisions) | not comparable — different suite; do not quote side by side | — |
+| p50 latency, 1 question (87-token state) | **100.7–117.7 ms** measured here on the M5 CPU · 39.5 ms on their T4 (their measured) | **33.1–38.3 ms** myna on the same box and process (two runs) = **3.04×** at the per-row minimum, and inside their T4 number | measured (§5 P4 4a, `runs/latency_matched.md`) |
+| p50 latency, 50 questions | **2,923–3,589 ms** here · 771.3 ms T4 (their measured) | **812–870 ms = 3.60×** same box; against their *T4* number myna takes 5–13% *longer* (812–870 ms vs 771.3), so the ≥ 5× projection did **not** hold (§9.21) | measured (4a) |
+| p50 latency, 1 question, state already scanned | no such API — every call re-reads the state | **14.9–17.3 ms = 6.78×** laya's same call | measured (4a) |
+| input window | **512 tokens** english / **1024** typed-decisions (`max_len` 1024 + `head_max_len` 256, read from the checkpoint config by the 4a harness) | the *state* is measured to 16,384 tokens — scanned, held at 576 KiB, answered from, at cost that grows only in the scan (§9.22). The *decision* at that length is not: v0's needle accuracy is 0.312 at 1k and 0.062 at 16k against a 0.167 floor (§9.25) | measured (state), **not met** (accuracy, G4) |
+| retained state | KV-free but re-encodes; window-bounded | **576 KiB fixed, independent of length** | measured |
+| calibration ECE | **0.081** after temperature fit (their measured) | **≤ 0.02**; 0.0076 on v0 **dev**, whose temperature was fit on those rows — read as optimistic (§9.11) | measured (v0), level disputed |
+| refusing a decision | nothing in the response shape refuses: `system_one` returns a choice for every question, and a caller can only threshold `confidence` itself | `Myna(abstain_below=t)` withholds the commitment with a measured `reason`; risk/coverage on `calibration.jsonl` runs 0.349 → 0.596 as coverage falls 1.00 → 0.10, and **no rung reaches G5's 0.95** on v0 (§9.24) | measured (5a/5b), gate not met |
+| browser artifact | ~1.7 GB fp32 / ~420 MB int8 (arithmetic) | measured in real Chrome, cold cache: **59.32 MiB fp32** artifact — the trunk shared, `weights.bin` fetched **once** — answering a live page with **6/6 parity checks green**, and **73.09 MiB** on the wire once the 13.58 MiB wasm runtime is counted. Dynamic int8 gets the artifact to **18.56 MiB** (inside the ≤ 20 MB target) and moves option probabilities by **6.48e-02** = 648× the fp32 bound, so it buys bytes and not agreement (§9.28) | measured (6b) |
+| on-device serving, Apple silicon | no MLX path — laya's published numbers are a T4 and the 4a harness ran it here on the CPU | **MLX port on the M5 against torch-MPS on the same checkpoint: 1.76–2.22× fp32, 1.79–2.41× int8**, each cell the per-row minimum of two committed runs. int8 gets the artifact to **17.40 MiB** (3.17× smaller, same container) and buys **no milliseconds**: 5 of the 6 linear shapes the model actually uses are *slower* quantised, at 10–37 GB/s of weight read against fp32's 55–257 (§9.29) | measured (6c) |
+
+The latency cells are one process on one M5 laptop, `device=cpu`, both engines fp32. An absolute p50
+from that laptop is a range, not a point — two committed runs of the same harness differ by up to
+22% on laya's 50-question row and 14% on myna's, because other sessions share these cores
+(§9.23). So each ratio cell is the **minimum across the committed runs** (`latency_matched.md` and
+`latency_matched_run1_superseded.md`), taken per row, and every cell names the run it came from.
+Quote the ratio, never the millisecond figure.
+
+### 2.2 Acceptance gates — the project is not finished until all pass
+
+| # | gate | pass condition | status |
+|---|---|---|---|
+| **G1** | Accuracy beats the witness | macro decision-v2 test ≥ 0.70 on the frozen split, per-source table published, ≥ 0.4331 majority floor by ≥ +0.15 | **met, on the v6 checkpoint scored through this repository's own frozen instrument.** `bench/v6_audit.py` re-scores all 1,176 `test.jsonl` bundles and writes a metrics dump, and the unchanged `myna.report` arithmetic accepts it: **macro 0.8620375366903147** against the **0.70** target and the **0.4330647953941198** majority floor — `margin_observed` **+0.4290** where **+0.15** is required, `g1/pass: true`, and `bench/significance.py` puts a row-clustered 95% interval on each half of that sentence over the same 1,176 rows at `--B 20000 --seed 20261031`: macro **0.8620 [0.8430, 0.8800]** and margin **+0.4290 [0.3900, 0.4424]**, so neither half of the pass depends on a draw that happened to go well (`runs/significance_v6.md`), with 16 of 16 cells kept at n ≥ 30, `dropped_cells: []`, `unmatched_sets: []`, `below_majority_floor: []` and the per-source table printed in `runs/v6_test.report.json`. The published column beside it is 0.8583 — the 4-dp read of `test_audit/macro_acc`, **0.8582510184910809**, in `runs/witness-v6-master-paper.json` — and the local re-score is the *higher* of the two (+5 of 1,440 questions, 8 of 16 cells exact to the question), so the gate is not being cleared by the flattering arm. What the verdict does **not** claim, in priority order. (i) **The trunk is borrowed.** v6 is a fine-tuned `microsoft/deberta-v3-large` — 434,012,160 of its 446,631,182 params, 1.736 GB of `model.safetensors` — with 12,619,022 params of Myna readout on top; §2.3 makes that a headline condition, not a footnote, and the contribution this gate certifies is the readout and the routing, not the encoder. (ii) **The arm is in-domain.** v6 was fine-tuned on `decision-v2-pilot/train.jsonl`, so all 16 cells are inside its training distribution, while laya 0.4.19 (**0.6664** [0.6439, 0.6888]) and vegaml 0.15.0 (**0.6160** [0.5898, 0.6415]) are zero-shot on 14 of the 16 cells; the gap over laya is **+0.1956 [0.1701, 0.2210]** — a paired difference whose lower bound excludes zero, cross-checked without a resample at McNemar 391 against 67 over 458 discordant pairs, p = 1.05e-56 — and it is a trained-versus-untrained gap, not a like-for-like one. (iii) **It is not the artifact the rest of the table describes.** G2's 3–4× ratio and G3's browser build are measured on `runs/myna-v0` (14.45M params); v6 has no ONNX export at all, so the speed and deployment gates and the accuracy gate are met by different weights (§9.69). (iv) The 0.6724 `banking77/intent` cell carries the one figure this box cannot stand behind — `none_absent` 0/12 against the campaign's 7/12, because the open-set gate is reconstructed from tensor shapes (§9.68). (v) **The checkpoint is not in git** — `runs/` carries the witnesses, while the 1.799 GB these commands load is the released checkpoint (hosted separately) (§9.68(ix)), so a clean checkout re-runs none of them without that download. For contrast, the row stays in the registry: `v1b-kaggle-3600b` is **0.4893** · floor **0.4331** · **+0.0563** [0.0192, 0.0676] — `not met`, and that is the arm this gate sat on for every earlier tick. `bench/reproduce.py`'s `v6-g1-report`, `v6-test-metrics` and `v6-significance-paired` rows re-derive the numbers above from committed artifacts |
+| **G2** | Latency claim survives equal-footing re-measurement | same box, same window, same question count, direct `Agent` call not `Router`; published ratio recomputed from that or withdrawn | **met** (4a/4c): one M5 process, both fp32, `Agent.system_one`, ladder capped inside laya's 1024 window — **3.04×/3.21×/4.12×/3.60×** at 1/5/10/50 questions end-to-end and **6.78×/4.67×/4.75×/3.65×** on the ask-only path, each the minimum of two committed runs, `runs/latency_matched*.md`. G1 is *not* implied, and now claims no verdict either: this ratio is `runs/myna-v0` at 14,449,280 params — the checkpoint that fails G1 and G5 — against laya's 421,293,827, while G1 and G5 are met by v6's 446,631,182, which is 31× heavier and was never on this ladder (§4.2, §9.69) |
+| **G3** | Deployment works for real | ONNX browser build answers a live page's decisions; bytes + p50 + cold-load measured in Chrome | **met, as a mechanics gate only.** `browser/index.html` runs the exported artifact in real Chrome 153 and answers three typed decisions with the same probabilities the torch engine prints (6/6 parity checks, both isolation modes, desktop and mobile widths, `runs/browser_g3.json`); bytes, cold-load and p50 are measured there with the box's load average recorded beside them. What this does **not** say: the artifact it deploys is v0 — `src/myna/onnx_export.py` exports that SSM trunk and nothing else, so v6's G1 and G5 passes have no browser build behind them and the deployment gate and the level are met by different weights (§9.69) — the ≤ 20 MB int8 route is open at the byte level and closed at the agreement level (§9.28), and the Apple-silicon int8 route closes for the opposite reason — 17.40 MiB at 9.24e-03 and **no** latency win at all, so fp32 is the artifact on both paths (§9.29) |
+| **G4** | Long-context is *correct*, not just cheap | needle-style typed decision ≥ 0.90 at 4k and ≥ 0.85 at 16k state | **not met — measured on a completed dose, and no longer gated on hardware.** v0's needle curve (`runs/needle_myna-v0.md`) reads 0.188 at 128 tokens against a 0.167 floor — at chance on the shortest rung — so the longer rows are decay of nothing, and the harness says so itself rather than printing a table (§9.25). The 4k needle run then executed *on this box* (§6 prices it at 2.4 GiB retained, 1c measured 2.0194742679595947 s/update), was aborted at 425 of 1200 updates by 7b's own Stage A rule with the 128-rung at 0.1667 = the floor (§9.62), and was then resumed on the owner's order to the **full approved 1200-update dose**. Its n=60 ladder (`runs/needle_lc1_stageC_final.json`) reads **0.1833 at 4096 against G4's ≥ 0.90 — short by 0.7167 — and 0.150 at 16384 against ≥ 0.85, short by 0.700**, the first time either threshold has been measured on a 4k-trained checkpoint; the 128-rung is 0.150, so the harness still prints `readable: false` — not a decay curve, a flat line at chance (§9.63). Step 799 and step 1199 agree exactly on all three shared rungs (9, 13, 11 of 60), so the limiter is the mechanism, not the dose. **v6 cannot be scored by this harness, and the two reasons are different.** Offered to `bench/eval_needle.py` on this box it stopped inside needle *construction* — `src/myna/longctx.py:69` asks `encode_text`, and `src/myna/tokenizer.py:45` returns `tok.encode(text, add_special_tokens=False).ids`, an attribute the HF tokenizer `MynaV6` carries does not have (`runs/needle_v6.log`: `AttributeError: 'list' object has no attribute 'ids'`, 4.35 s, no rung printed). That is the harness's assumption failing, not a measurement, and no number is being claimed from it. Behind it sits the architecture: `MynaV6` takes `max_length: int = 512` and truncates the packed sequence to it (`src/myna/v6_engine.py:410`), and its backbone declares `max_position_embeddings: 512` — so a 4k *state* has no representation for this engine. Wiring a tokenizer shim would print a truncated-at-512 number against a 4k threshold, which is not G4's question (§9.69). The 16k *state* remains measured and cheap (§9.22) |
+| **G5** | Useful confidence, with abstention | risk/coverage curve on `calibration.jsonl`; ≥ 0.95 accuracy at ≥ 60% coverage on banking77 + dbpedia14 + trec | **met, on v6 — and on the gate's own three sources, pooled.** Abstention was already machinery, not a hope: `Myna(ckpt, abstain_below=t)` withholds the commitment with a measured reason, the fallback seam labels which engine committed, and the curve is a committed artifact. The level arrives with the v6 checkpoint: over its **three** named sources on the split the gate names (120 rows / 120 questions / 42 sets), accuracy is **0.883 at full coverage → 0.969 at 80% → 0.986 at 60%** and `g5.pass` prints **true**, with **best coverage at the 0.95 target = 0.8** (96 questions, 0.96875) at a machine-readable floor of **0.8517** — a floor that is *settable*, not just quotable: the engine abstained on **24 of 120** questions and the curve withholds **24** below it, and the harness exits 1 if those disagree (§9.69). It is not a three-source slice either: the same curve over all 11 pooled sources and 568 questions also passes (**0.968 at 60%**, floor 0.884, 227 against 227). Three caveats ride with the verdict, not under it. (i) The gate was written against **v0**, and v0 still does not reach it — `runs/risk_coverage.json` prints `g5.pass: false`, max 0.596 at 10% coverage, with those three sources at 0.000 / 0.025 / 0.150 (§9.24); nothing about that artifact changed. (ii) **banking77 does not clear the level alone**: at the pooled 0.8517 floor it is 0.909 on 55% coverage against dbpedia14's 1.000 on 97.5% and trec's 0.971 on 87.5% — the pooled wording of the gate is what passes, and the per-source verdicts in the same witness read `true / true / false`. (iii) v6's temperatures and conformal quantiles were fitted on a separate CAL split, so a curve on `calibration.jsonl` is **in-sample for the confidence mechanism** even though that is the split §2.2 names; the control is the same trio curve re-run on `test.jsonl` (`risk-coverage-v6-trio-test`, **0.950 at 80% and 0.975 at 70.1% coverage**, `g5.pass: true`, floor 0.903 with 104 abstentions matching 104), and it also passes — banking77 again the weak source at 0.921 on 32.8% coverage |
+| **G6** | No regression on what already worked | synthetic v0 test ≥ 0.94 | **not met — measured on the checkpoint the gate was written against, and the pairing is the artifact.** v0 scores **0.9525 / 0.9496** on the synthetic test split and `v1b-kaggle-3600b` — the checkpoint every G1 figure here is scored on — scores **0.3423 / 0.3489** on rows hashed to the same digest per seed (`998d7375…`, `fc9cbe3b…`), so the two arms differ by weights alone (§9.65). 0.3423 is **0.5977 short of 0.94**, and the floors the same witness prints (uniform **0.3370**, majority **0.3546 / 0.3463**) place it +0.0053 above chance and *below* the modal-label floor: 4 of 9 cells under chance on seed 0, so this is not an uninformative head either. What the verdict does **not** say is that v1 lost something v0 had: `v1b-kaggle-3600b` trained on the real `decision-v2` suite and never saw a synthetic row, so the number is zero-shot retention of the task family, and the transfer failure is the finding (§9.65). **v6 cannot be put through this gate at all**, which is not the same claim: `bench/eval_synthetic.py` loads `model.pt` beside `tokenizer.json` into an `MynaModel` and exits if the embedding count disagrees with that tokenizer, while a v6 campaign directory carries `myna-v6-unified.pt` plus `deberta-v5-finetuned/` — an HF `DebertaV2Model` with a 128,100-token sentencepiece vocab and neither of the two files the harness asks for (§9.69). The logged **0.9523** of `runs/train-v0.log` stays out of the binding — §9.30 disqualifies its nine rows as a set this box can regenerate — and a draft of this row once cited "0.951", which no artifact printed |
+| **G7** | Reproducibility | one command per result, seeds pinned, witness JSONs committed, `pytest` green | **met, as a binding rather than a rebuild.** `bench/reproduce.py` holds 49 registry rows, each binding one published table cell to one command and one committed witness, and `make repro` re-reads the 205 quoted figures out of those artifacts rather than out of the prose; the python commands among those rows are checked against the tool behind them — its `--help` must still print every flag the row publishes (§9.43); the seeds live inside the printed commands (`--seed 0`, `--seeds 0 1`, `--seed 20261031`), not in sentences about them. What this does **not** say: no target *executes* the registry end to end — 35 rows re-run on this box, 6 retrain a checkpoint, 3 need a laya checkout on `PYTHONPATH`, 1 need vegaml in its own venv, 3 need Google Chrome and 1 is `KAGGLE` — which is why TODO 8b stays unticked and why G7 is discipline rather than a one-command rebuild. Every count in this cell is now read back against `ROWS` by `bench/gates.py`, so this row — the table's one hand-copied cell — goes red rather than quietly stale (§9.44) |
+
+**This column is not a claim.** `make gates` (`bench/gates.py --check`) re-reads each cell's
+leading verdict word, the registry row that gate cites, and the named field inside a committed
+artifact — and a `met` verdict is refused if the field it rests on prints `false`, while an
+`open` verdict is refused unless the gate names a run this box cannot do. It also reads G7's
+counts back out of this table and compares them with `ROWS`, because §2.2 is the one place a
+gate row is typed by hand rather than generated — a stale number here now goes red instead of
+riding along (§9.44). As of §9.69 the tally
+is **5 met, 2 not met, 0 open** — G1 and G5 moved together, both on the v6 artifact and each with
+its witness re-derived by this repository's own frozen instrument rather than quoted from the
+campaign's notebook — and the two that remain `not met` are the two v6 cannot be scored on at all:
+G4's engine truncates its state into a 512-token budget, so there is no 4k/16k ladder to read, and
+G6's harness builds the SSM `MynaModel` from `model.pt` + `tokenizer.json`, neither of which a v6
+campaign directory carries (§9.69). Neither is a dose question and neither is `open`; G6 remains as
+§9.65 measured it against `v1b-kaggle-3600b` — so the release gate is not clear; README's copy of that table is generated from the same
+file and is therefore *not* evidence (§9.31).
+
+### 2.3 Non-goals (deliberate exclusions)
+- **No text generation, no vocabulary readout.** The contract is decisions in constant time.
+- **No KV cache.** If a mechanism needs the token list at answer time, the architecture failed.
+- **No cloud dependency for inference.** Training may use a rented GPU; serving may not.
+- **No aggregate-average marketing.** Claims are stratified per source and per stratum.
+- **No borrowing a pretrained prior into the trunk** without saying so in the headline; if we
+  ever initialize from someone's encoder, the contribution is the readout and we label it as such.
+
+---
+
+## 3. Architecture
+
+### 3.1 Shape as built
+
+```
+observation tokens  ──► embedding ──► bidirectional GLA trunk (6 layers)  ──► per-layer matrix state S
+                                                                      │
+   question text + option descriptions ──► question branch ───────────┘
+                                                            │
+                              pointer probe (wq, wk over d_ptr=256) over option spans
+                                                            │
+                                     one logit per option, per question
+```
+
+| component | as built (measured) |
+|---|---|
+| trunk | 6 layers × d_model 384 × 6 heads, d_k = d_v = 64, d_ff 1024 |
+| trunk params | 15,156,864 |
+| probe params | wq 98,560 + wk 98,560 |
+| **total** | **15,353,984** at vocab 4096; ~16.9M at vocab 8192 |
+| retained state | 6 × 6 × 64 × 64 × 4 B = **576 KiB**, length-independent |
+| scan forms | recurrent (streaming) = chunked (training, chunk 16; 256 under no_grad) = quadratic (reference), pinned equal in float64 |
+
+### 3.2 The five design decisions that are load-bearing
+1. **Causal trunk + fully bidirectional question branches.** A causal state is what makes prefix
+   caching exact; questions are short enough to afford a backward scan inside the branch.
+2. **Questions are branches, not prompt tokens.** Each resumes from the cached state end, so
+   cross-question isolation is architectural, not a mask (`test_question_branches_are_isolated`,
+   atol 1e-9).
+3. **No vocabulary head.** One pointer mechanism over option spans serves all three decision types.
+4. **Three scan forms proven equal.** This is the reason the streaming path can be trusted at all;
+   it also caught the padding-decay bug that no loss curve would have shown.
+5. **Long memory is the prior.** Forget gate initialized to a ≈ 0.99, not sigmoid(0) = 0.5; at 0.5 a
+   token's trace decayed to ~1e-6 within 20 steps and the model could never read long inputs.
+
+### 3.3 Known architectural limits
+1. ~~**Shared question-tensor batch contract.**~~ **Fixed in P2.** A batch can now carry a
+   different question set per row (`[B, N, Lq]` and friends, padded on all three varying axes with
+   a `has_gold` mask), which is what `boolq` and `mnli` need — their instruction text *is* the
+   per-row question, so no regrouping could ever have made them batchable. The shared form is still
+   accepted, so the streaming engine, the MLX mirror and serving are unchanged.
+   **What remains open is the price, not the shape:** `bench/mem_profile.py` measures 1.6 MiB of
+   retained activations per question-token position, so a mixed batch pays for its longest row and
+   `--max-q-cells` is the dial that keeps it survivable (§5 P2, §5 P3).
+2. **Mid-state edits cost a full re-encode.** Prefix/suffix block caching is specced but unbuilt
+   (Pillar 3 of V2_SPEC).
+3. **One matrix state cannot hold verbatim recent detail and distant gist simultaneously.**
+   Two-timescale state + learned eviction is specced, unbuilt (Pillar 4).
+
+### 3.4 Code map
+`src/myna/`: `trunk.py` (GLA scans) · `model.py` (trunk + probe + `forward_truncated`) ·
+`tokenizer.py` (byte-level BPE + `question_tensors` / `batch_question_tensors`) · `data.py`
+(synthetic corpus) · `real_data.py` (kev suite JSONL adapter, `flatten_groups`) ·
+`paraphrase.py` (9 phrasings/core + the reserved held-out index) · `engine.py`
+(streaming sessions, and the abstention floor: `abstain_check`, `policy` echo) · `fallback.py`
+(the `Decider` seam, the `DECIDERS` registry, `laya_spec`, and the per-decision `model` label) ·
+`rlcd.py` (strictly-proper scoring + KL leash) · `longctx.py` (needle
+generator) · `mlx_model.py` (Apple inference mirror) · `serve.py` (`/v1/sessions`, `/v1/predict`) ·
+`report.py` (the 3g stratified table: per-(source, question) cells, both floors recomputed from the
+split, instruction-derived strata, laya's own accuracies joined by cell, G1 verdict) ·
+`weights.py` (P11's release fetcher: stdlib `urllib` only, GitHub's own asset digest checked per file
+and again on cache reuse, `SHA256SUMS` written last, and every failure a sentence with the command to
+type).
+`bench/`: streaming bench, laya witness runners, needle eval, MLX bench, result summarizer,
+`pull_upstream.py` (P1 data pipeline), `mem_profile.py` (per-axis step memory),
+`pilot_topology.py` (question-set topology + rows-per-forward under each contract),
+`mutation_paraphrase.py` (the P1 gate's mutation battery, 32/32),
+`coverage_replay.py` (§9.58's CPU-only sampler replay: both drawers over the committed corpus at each
+arm's executed dose, no model and no device, exit 1 unless the banner is byte-equal to the runs' and
+each arm's replayed total equals its own `paraphrase_draws`),
+`mutation_weights.py` (the P11 fetch/serve gate, 16 mutations),
+`mutation_memory_plan.py` (the P3 sizing/stop/resume gate, 44 mutations),
+`mutation_report.py` (the 3g reporting gate: every floor, weight and stratum in the table),
+`scope_pricing.py` (the 9d scope table: the committed report's cells subset four ways, the
+roll-up *imported* from `myna.report` rather than restated, and the guard that refuses to print
+unless the unfiltered row reproduces the report to the digit) and its gate
+`mutation_scope_pricing.py` (24 mutations; §9.46 is why it exists and what its first pass found),
+`mutation_kaggle_bundle.py` (the entrypoint + packager gate, 48 mutations — and §9.40 is the reason
+its catching test is capped to one update rather than a training run, and §9.48 why six of them
+are P10's launcher plumbing), `check_python311.py` (the 3.11 witness
+that runs the package on a real 3.11 interpreter and exits 2 rather than skipping),
+`scan_secrets.py` (`make secrets`, §5 P0: every blob in the object database against nine credential
+shapes, the scanned-vs-in-the-db denominator asserted, and a hit classified by whether a ref reaches
+it — reachable fails, unreachable prints as local debt) with `tests/test_scan_secrets.py` as its gate,
+`anti_prior_audit.py` (the P10 measurement without a model: both arms drawn through the *real*
+batcher at the *published* dose, per-source weight sums against their row counts, the between-arm
+mix column that is the only half belonging to the weights, and `--compare` over every `COMBINE`
+rule) and its gate `mutation_anti_prior.py` (41 mutations; 28 over the trainer's drawer and
+weights, 13 over what the harness *prints*, which is §9.48's point),
+`bench_latency_matched.py` (the 4a/4b harness: one process, both engines, matched inputs, `flock`ed
+output, and since 8a a `meta` that carries its own argv and the box's load average at the end of
+the run) and its gate `mutation_latency_matched.py` (34 mutations), `risk_coverage.py` (the 5b
+risk/coverage curve, its floor re-run and the G5 verdict) and its gate `mutation_p5.py`
+(49 mutations across the engine's commitment, the seam's labels, the transport and the curve),
+`eval_needle.py` (the 7a recall ladder — `--lengths` so the published ladder *is* the command that
+ran it, and `baseline_verdict`, which refuses to let a curve that starts at the uniform floor be
+read as decay) and its gate `mutation_longctx.py` (24 mutations — the last four over the
+`tail_cap` grad window, which is what 7b's truncated-backprop run trains on),
+`src/myna/train.py`'s `--long-context` loop (the same run's trainer: a memory plan priced off
+the gradient window rather than the state, a `--save-every` cadence capped at 50, a guaranteed
+final save, `--resume`, a swap ceiling as a stop signal, and a `metrics.json` that records the
+dose that executed) with its gate `tests/test_train_longctx.py` (20) and
+`bench/mutation_train_longctx.py` (24 mutations),
+`bench_mlx.py` (the 6c Apple harness: both engines over one checkpoint at real state/question
+widths, artifact bytes read from disk, and the drift table with a name beside every maximum),
+`diag_mlx_int8_gem.py` (the 6c mechanism probe: myna's own linear shapes, 200 matmuls queued per
+sync, with the effective-GB/s column that tells the reader whether the loop measured a kernel or
+Python), and their gate `mutation_mlx.py` (14 mutations over what gets quantised, how it dispatches,
+and which byte figure the manifest quotes). `browser_g3.mjs` measures the artifact in real Chrome
+(bytes, cold load, p50, screenshots) with `quantize_int8.py` producing its int8 row and
+`mutation_browser.py` (24 mutations) as its gate.
+`src/myna/onnx_export.py` is the G3 export path — two fixed-width graphs, the chained-scan
+composition check, and a parity report — with its gate `bench/mutation_onnx.py` (22 mutations).
+`kaggle/`: `run.py` (one-command entrypoint: corpus discovery, the measured flag set, `--resume` only
+when a snapshot exists, tee to `train.log`, `run.json`, non-zero propagation), `campaign.py`
+(the notebook cells: every path it emits checked against the box, every flag checked against
+`run.py`'s `--help`, the GPU-hours priced off `runs/v1b_kaggle_3600b.train.log`, and an A/B pair
+that differs in exactly one flag), `package_dataset.py`
+(stage the pilot corpus, verify every byte against the corpus, print the upload command, never run
+it), `requirements.txt`.
+`tests/`: **561 passing + 1 skipped**, measured on this tick's tree — 562 collected by
+`pytest --collect-only -q`, and the run's own summary line splits it 561/1: 292.95 s before the
+§9.52 test edits and **289.00 s** after them, so the split survived the round-2 fixes and only the
+seconds moved (the first run of this tree read 283.78 s). The re-read after the checkpoint-recovery and
+GPU-denial commits (§9.53) is **258.29 s** over the same 561 passed / 1 skipped / 562 collected — that
+batch added no test and removed none, so the count is confirmed rather than merely unchanged, which is
+the difference 9k exists to record. The registry-row tick that follows it (§9.54) re-reads **261.60 s**
+on the identical split, because it edited one test's coverage count and added none. The Tier 0
+over-the-control tick (§9.55) re-reads **293.44 s** on the same 561 passed / 1 skipped / 562 collected,
+its only test edit again a coverage count rather than a new test. The **+5**
+over the 556 this map read earlier in the same tick are §9.51's arms, all five in
+`test_reproduce.py` (the platform-limit table, the note path, the still-red-on-macOS path, the
+missing-base-dependency path, and the guard that names which four rows the limit reaches) — counted
+by re-collecting rather than by adding, and `--collect-only` piped through
+`awk -F'::' '{print $1}' | sort | uniq -c` is now part of the re-read, because two of the three
+drifts this paragraph has confessed to were invisible without a per-file baseline. The skip is
+the KEV-gated parity test, green wherever `kev` is installed. **That count is a claim about this
+box**, and §9.51 is what it cost to say it without the qualifier: `test_mlx_int8.py` (8) and
+`test_mlx_parity.py` (3) need MLX, and off macOS MLX cannot even load — PyPI's Linux wheel ships the
+bindings without `libmlx.so` — so both files skip there via `try / except ImportError` +
+`pytest.skip(allow_module_level=True)`, which also catches the *unloadable* case that
+`importorskip` re-raises. The four MLX registry rows say so as a printed note rather than failing
+§9.43's `--help` assertion (`bench/reproduce.py`'s `mlx_unloadable_here`, pinned by 5 arms and
+mutation-checked 4/4).
+(A §3.4 map is present tense, so this
+count is due whenever the suite moves; it read **466** until tick 10b, which added the P10 lane's
+**42** — 35 in `test_anti_prior.py`, 3 in `test_kaggle_bundle.py`, 4 in `test_cli_help.py` — counted
+by collecting the two trees and diffing the per-file totals rather than by subtracting remembered
+numbers (§9.44's rule, and §9.46 is the tick that found the stale copy this sentence is the successor
+to). It then went **48 stale** across the two ticks that followed and nobody re-read it: 3 are that
+tick's `test_scan_secrets.py`; the other 45 arrived between tick 10b and it, and that sentence did not
+pretend to know which files they came from because no per-file baseline had been recorded — the same
+hole §9.44 is about, and the reason *that* number was a re-measurement (557 collected, 556 + 1 from
+the run) rather than 508 + 48.
+The 8a label pass added `test_train_logging.py` (4: `split_report`'s four
+figures pinned, a lopsided split distinguishable from an even one at the same total, the empty
+group set logging rather than raising) and one end-to-end `--no-laya` case in
+`test_latency_matched.py` that reads the box's live `getloadavg()` against the
+`meta.load_avg_after` the harness just wrote, so a stubbed zero triple fails on a working machine. The ONNX gate's 8 tests are inside that count (they skip unless the optional
+`browser` extra is present), and their session fixture tears the runtime down deliberately: a live
+onnxruntime pool can abort the interpreter *after* a green summary, which reads as a broken
+baseline to any harness that trusts an exit code. The MLX int8 gate is `test_mlx_int8.py` (8 — the
+quantised tree really holds packed uint32 and exactly the linear count, quantising one engine leaves
+a second bit-identical, the artifact round-trips against the file's own byte count and *unequal* to
+the tensor sum, the two refusals `mx.quantize` cannot make itself (`bits=6`, a group size that does
+not divide the input), `--keep` honoured, and the drift bound sized under the smallest top-two
+spread). The P5 gate is `test_abstain.py` (the flag against the distribution the same answer
+prints, monotonicity in the floor, noul's confident "no", the reason's measured numbers, the
+policy echo), `test_fallback.py` (only the abstained questions reach the secondary, the label
+follows the decider rather than a literal, both-refused reported, the laya schema shim held equal
+to `bench/eval_laya_real.py`'s) and `test_risk_coverage.py` (a synthetic oracle whose curve the
+test knows in advance: informative, uninformative and anti-calibrated heads, both G5 boundaries
+landed on exactly, and the floor's own row belonging to the kept set on both sides of the
+comparison). The P3 gate is `test_memory_plan.py` (sizing arithmetic, the refusal, the CUDA headroom
+read through a monkeypatch, the stop rule both ways, snapshot round-trip, resume),
+`test_kaggle_bundle.py` (the entrypoint's refusals and composed command, a real 2-update run through
+it, the packager's hash discipline) and `test_report.py` (both floors from the cell's own rows, the
+row-weighted cell mean, the instruction-derived strata and their 0.5 boundary, the laya join, the G1
+verdict's two halves, and the CLI on the frozen split reproducing §4.2's published floors);
+the device-resolution and calibration-split guards, the
+batch-sampling regression guards, per-row batch equivalence, float64 scan equivalence, engine parity,
+adapter invariants, and the paraphrase table + trainer-wiring pairs (the table's own tests cannot see
+the loop that uses it).
+
+
+---
+
+## 4. Baselines we are measured against
+
+All numbers below are **measured by us** unless attributed. Our own witness scripts and result
+JSONs live in `runs/`, and the small tables in it (`.json`/`.md`/`.log`) are committed — checkpoints
+and `*.pt` dumps are not (G7's "witness JSONs committed" is satisfied by the ignore rule, not by an
+intent; an earlier draft of this section said the opposite and meant it).
+
+### 4.1 laya, on kev decision-v2 (our seeded witness)
+`bench/eval_laya_real.py`, n=546, 40 per source, seed 0.
+**test 0.6319 · development 0.6392** — row-weighted over the 546 sampled answers, printed by the
+harness itself. Per-source **test**, computed from that witness's own rows under the same
+weighting: agnews 0.915 · trec 0.825 · dbpedia14 0.775 · mnli 0.675 · yelp 0.650 ·
+boolq 0.575 · imdb 0.550 · contrastive 0.500 · sst5 0.425 · amazon 0.325 · banking77 0.250.
+
+Three of the eleven cells that list used to carry were not per-source at all: they were
+per-*question* rows read out of `runs/laya_witness_test.log` and lifted into a source list —
+`agnews 0.950` is `agnews/topic`, one of that source's five questions (the source is 0.915);
+`yelp 0.825` is `yelp/recommend`, one of two (0.650); and `contrastive 0.625` is the *noul*
+row of a qid that the suite also asks as a choice, 16 of that source's 40 answers (0.500).
+Only a source with one question was safe to quote that way, which is eight of eleven cells and
+exactly the coverage that lets a bad list survive a proofread (§9.32).
+
+Reproduce with the same seed and the same 40-per-source slice — it needs a laya checkout
+on `PYTHONPATH`, which is why the row is `external-laya` in `bench/reproduce.py`:
+
+```bash
+uv run python bench/eval_laya_real.py --split test --n-per-source 40 --seed 0 --out runs/laya_decision_v2_test.json
+```
+
+The witness is that file, and the first line of its json is the command that wrote it.
+
+### 4.2 The floors, so "better" means something
+Computed from the same splits, pooled per (source, question), n ≥ 30:
+**macro majority-class 0.4331 · macro uniform-chance 0.3321.**
+Both are now recomputed from the shipped rows by `src/myna/report.py` (`python -m myna.report
+--suite data/decision-v2-pilot --split test --metrics <run>`) and pinned by a test at 0.433 / 0.332,
+so the floor G1 is judged against is derived twice by two independent pieces of code and agrees. The
+uniform figure changed from the 0.3292 published here earlier — see §9.16.
+Notable: laya beats the constant predictor by **+0.0125 on imdb** (0.550 over a 43/80 floor) and
+**+0.0375 on boolq** (0.575 over 43/80) — i.e. on
+its binary tasks laya is statistically indistinguishable from answering the same thing every time.
+This is why the accuracy throne is not defended as strongly as a 0.63 average suggests.
+The same harness also measures, rather than lists, the **9-vs-2 stratum split**: on the test split
+boolq and mnli are *per-row-instruction* — the row's own text is the question (80 distinct
+instructions over 80 boolq rows, 80 over 116 mnli slots) — while the other nine repeat a handful of
+schemas across every row (agnews: 8 distinct instructions over 300 labelled slots, all repeated)
+even though the adapter's group signature splits them into 113 near-singleton sets. That distinction
+is what makes "groupable vs not" a measured fact instead of a naming exercise; see §9.17.
+
+Reproduce the two floors with the test that recomputes them out of the shipped rows and
+asserts both literals — `uv run python -m myna.report` prints the same numbers for a
+human, and this is the version that cannot be edited into agreement:
+
+```bash
+uv run pytest tests/test_report.py -q
+```
+
+
+### 4.3 laya's own published numbers (from its repo, for context only — different suites)
+typed-decisions 0.766 on 2,000 decisions · ECE 0.081 after temperature fit · T4 p50 39.5 ms for 1
+question rising ~14.9 ms per extra question (771.3 ms at 50) · checkpoints 421.29M english /
+321.91M multilingual. Their `BENCHMARKS.md` states that Jev figures are third-party and never
+independently measured — we match that discipline: no competitor number in our tables unless we
+ran it or we label whose number it is.
+
+**Their T4 ladder does not transfer to this box, so 4a measured laya here rather than citing it.**
+Same checkpoint (revision `55cf4c4`, the one their server-CPU table used), `Agent.system_one`, fp32,
+weights fp32 with autocast off, `max_len` 1024 / `head_max_len` 256, 421.29M params, 8 intra-op
+threads, two committed runs (p50, `run3`/`run1`): **100.7 / 117.7 ms** for one question, 272.0 / 305.5
+at 5, 506.3 / 574.9 at 10, 3,589.5 / 2,923.4 at 50 — 2.5–3.0× their T4 figure at one question and
+3.8–4.7× at 50, i.e. **57–71 ms per extra question here against their ~14.9 ms**. Both vendors'
+latency is now from the same silicon; the T4 column stays labelled as theirs and is never used as
+myna's denominator, which is exactly why §2.1's 50-question row had to be restated (§9.21). A third
+run of the same command, whose artifact the current one overwrote, read within 0.4% of these at one
+question and 32% below at 50 — this column is machine-state dependent and the ratio is the
+publishable quantity (§9.23).
+
+### 4.4 Jev
+Browser agent with a dynamic, indexed action space (TypeSafe). Published p50 236–276 ms per
+decision per laya's comparison. Relevant to us only as the deployment framing the ecosystem is
+currently arguing about: *decisions inside a browser tab, no API cost.* That is myna's best
+showing, not its worst.
+
+---
+
+## 5. The plan
+
+Ordered by dependency, not by excitement. Each phase has an exit test; a phase that fails its test
+does not advance, it goes in the corrections log (§9).
+
+### P0 — Repo and measurement hygiene *(partly done)*
+- [x] Fix duplicate-row batching: `draw_batch()` shortens instead of repeating (`385e06c`).
+      Mutation-checked: reverting it fails the regression test.
+- [x] Same fix in `rlcd.py`, which would have **crashed** on a short pool.
+- [x] Startup diagnostic printing median pool size and share of sets with pool < batch.
+- [x] Fit temperature on the suite's own `calibration.jsonl` (448 records, 568 questions) instead
+      of `dev`. We fit it on dev through v0, which quietly flatters the dev number — a
+      methodological defect on our side. The counts re-measured *through our adapter*:
+      **calibration 448 rows / 568 labelled questions**; dev and test 1,176 rows / 1,440 questions
+      each (the pilot dir's copies of the frozen eval splits).
+      **Fixed:** `load_suite` now reads the fourth split and
+      `train.temperature_source` prefers it, falling back to dev only when it is absent (the
+      synthetic corpus ships none). The printout and `metrics.json` carry the split *and the row
+      count it fit on*, because a label alone is not a witness — an earlier draft of the line
+      printed "calibration" while fitting on dev and only the fitted value gave it away.
+      Witnessed end to end: `temperature: 3.0 (fit on calibration: 20 rows in 20 sets)` on a
+      20-row sample suite, `(fit on dev)` on the synthetic path. Mutation battery: 8 mutations of
+      the new code, all caught — the first pass missed `data.get("calibration", data["dev"])`,
+      which is invisible unless the key is *absent* rather than empty, so
+      `test_synthetic_data_with_no_calibration_key_reports_dev` now covers exactly that.
+      Consequence for the record: **v0's dev metrics carry this defect** (its temperature 3.0 was
+      picked on the same rows), so read v0's dev ECE as optimistic. Its *test* metrics do not —
+      test rows were never in the fit.
+- [x] `--device auto` must consider CUDA (it resolves to mps/cpu only, so any cloud box would
+      silently train on CPU). **Fixed:** `train.resolve_device` — MPS, then CUDA, then CPU, and an
+      explicit `--device` is never rewritten. Order matters and is tested both ways.
+- [ ] Re-derive every V1-B conclusion; numbers in `runs/*.log` predate `385e06c` and are void.
+- [x] Push the repo. **Closed 2026-09-30:** the tree is public at
+      `github.com/anonymous/myna pilot corpus included. The counts *at that push* were 72 commits
+      and 224 tracked files, from `git rev-list --count HEAD` and `git ls-files | wc -l`; re-read
+      earlier on 2026-10-01, before the commit that adds `make secrets`, the same two commands printed
+      **75** and **221** (four paid-path files removed since, one witness added). A figure that wants to
+      survive has to carry its date, because a present-tense count in a prose line is the one kind of
+      stale this repo has no check for (§9.44).
+      Two things were checked on the way out rather than assumed. (1) The v0 weights went onto the repo
+      as a **Release asset** rather than into git history, with the `risk_coverage` witness re-run
+      against them to prove they are the published ones. (2) Every blob in history was scanned for
+      credential shapes — and that scan is now a tool, `bench/scan_secrets.py` behind **`make
+      secrets`**, because the first two passes were one-off commands and both were wrong.
+      It walks `git cat-file --batch-all-objects`, not the refs, and then splits what it finds into the
+      two things that are not the same fact: a hit in a blob **reachable from a ref** is in the set a
+      push transfers, so it fails the gate; a hit in an **unreachable** blob is local debt on this
+      machine — printed, counted, and not red, because making a clean tree permanently red is how a
+      check gets muted. What is stable enough to state in prose: **no hit reachable from a ref**, for
+      9 shapes (`KGAT_`, `gho_`, `ghp_`, `github_pat_`, a PEM private-key header, `AKIA`, Slack `xox*`,
+      `sk-`, and a URL carrying `user:secret@`). The unreachable hits are this tool's own superseded
+      drafts — the first version of its URL pattern, which matched that pattern's own source line, and
+      the first version of its test fixture, which hard-coded the fake tokens instead of building them
+      from pieces so the committed blob stays outside the shapes it tests. Both were staged, then
+      replaced, so the old objects are in the database and in no ref. That is the value of the split: a
+      refs-only scan would have called them nothing, and an object-database scan that could not tell
+      them from a leak could never go green on its own tree.
+      The blob and byte counts are deliberately absent from this sentence: committing the fix that made
+      the scan possible added five blobs of its own, so a number written here was stale before the
+      commit finished — `blobs scanned`, `blobs in the db` and `unreachable blobs` are the command's
+      output, and §9.44's rule applies to a scanner the same way it applies to a table.
+      The ninth shape had a second history worth keeping. Written loosely (`://` … `:` … `@` over any
+      bytes) it hit **three** blobs, all of them `docs/screenshots/*.png`, because a compressed PNG
+      byte stream happens to spell that sequence; each was read, confirmed to start with the `\x89PNG`
+      magic, and re-checked with the same pattern restricted to printable ASCII, which returned
+      nothing. So the pattern is printable-only — the real fix was the shape, not an allowlist that
+      would have quietly swallowed the next hit. No credential-shaped string in this history has ever
+      been a credential: the only `KGAT_` text committed is prose reading `KGAT_…`.
+      What the old line said was "845 blobs, 0 matches", and 845 is not a number any command here
+      reproduces. Re-running the same recipe this session printed "0 blobs scanned, 0 matches" — a
+      mis-parsed `git rev-list --objects` field count that walked nothing and still came back green.
+      So `bench/scan_secrets.py` prints `blobs scanned` and `blobs in the db` on separate lines,
+      compares them, and exits 1 on a mismatch: **"0 matches" is only a result with the denominator
+      printed beside it** (§9.46's class, aimed at a secret scanner this time). The tool is itself
+      falsified — `tests/test_scan_secrets.py`'s three arms build a throwaway repo, require the clean
+      arm to print its denominator, plant two fake credentials and require the hit by shape and path
+      with a non-zero exit, then `--amend` them out of every ref and require the same blobs to be
+      still found, named as local debt, and *not* to fail the gate.
+      This line has now miscounted twice, both by remembering instead of reading: an earlier draft read
+      "71 commits and 238 tracked files", copied from a recursive tree listing that counts directories
+      and from a pre-push log.
+      What the push did *not* fix is the opposite half of §9.47: the V1-B weights lived under
+      `/private/tmp` and are gone, so no remote holds them either. *(This held for one day: §9.53
+      recovered them from the notebook's Output download and they are on the `v1b-checkpoint`
+      Release, hash-matched to the committed Tier 0 witness.)*
+- [x] **CI has never run a test, and the reason is now a gate rather than a surprise.** Closed
+      2026-10-01: `main` run **36785555798** (SHA `3ba18a3`) printed **545 passed, 8 skipped, 0
+      failed in 599.72 s** and exit 0, with `make secrets` walking 222 of 222 blobs at 0 matches.
+      All 7 runs the
+      Actions tab records fail identically at collection — `ModuleNotFoundError: No module named
+      'mlx'` in `tests/test_mlx_int8.py`, so **zero tests executed** while this box reported 556
+      passing beside them. §9.51 is the full measurement, including the first fix (`--extra mlx` in
+      the workflow) being falsified by the runner itself: PyPI's Linux wheel installs MLX's bindings
+      without `libmlx.so`, so off macOS the package is present and unloadable at once, and
+      `importorskip` re-raises that instead of skipping. What landed instead: the two MLX test files
+      guard the import with `try / except ImportError` + a module-level skip, and
+      `bench/reproduce.py` learned to tell a dependency this platform cannot load (a printed note on
+      exactly 2 error strings, 4 rows) from a missing base dependency or a dropped flag (red, always).
+      README's Quickstart names which rows each install choice leaves unread. **Round 2, same
+      bullet, one tick later (§9.52):** the collection fix worked — run 36779801999 executed
+      **519.31 s** of tests and printed **13 failed, 520 passed, 20 skipped**, which is the first
+      witness this repo has ever had that a test ran. The 13 are four box assumptions a Linux clone
+      falsified and nothing else could: onnx missing for the `int8-quantize` row's `--help` (5 tests,
+      so CI installs `--extra browser` and the Quickstart now says the *test* install needs it), no
+      `runs/myna-v0/model.pt` in a fresh clone because the weights travel as a Release (5 tests, so
+      CI downloads `gh release download v0-checkpoint`, which also puts §5 P0's own release claim
+      under test instead of under prose), two MLX bench harnesses whose usage text cannot render
+      off macOS (2, marked `macos_only` after a CPU-only rehearsal that prints its own blocker),
+      and one test that asserted `resolve_device("mps") == "mps"` — i.e. that this laptop has MPS
+      (1, now monkeypatched so it reads the policy). **Round 3, measured the same day:** run
+      36781802262 went green — `--extra browser` installed *and* loaded, `bench/quantize_int8.py
+      --help` answered on Linux, `gh release download v0-checkpoint` filled `runs/myna-v0`, and the
+      runner printed **545 passed, 8 skipped, 0 failed in 572.45 s** with the credential scan walking
+      **222 of 222** blobs at **0 matches** — a PR run, so the bullet stayed unticked one more pass.
+      **Closed on `main`:** run **36785555798**, SHA `3ba18a3b822b869eb47c63151550839fb58d782c`,
+      **545 passed, 8 skipped in 599.72 s**, exit 0, scan 0 matches over 222 blobs. The pytest line
+      carries `-rs`, so a future green must name each skip instead of just counting it — after 7 red
+      runs the run is the witness, §9.30, and §9.52 is the entry for what the first real run found.
+- [ ] Kaggle CLI auth is dead, and it gates the GPU lane rather than a row. Reproduced
+      2026-10-01: `~/.kaggle/access_token` is present (38 B, `KGAT_…`, never printed here) and both
+      credential paths fail identically — `kaggle quota` exits **1** on
+      `Authentication required to call the Kaggle API.`, and the same call with the file's contents
+      exported as `KAGGLE_API_TOKEN` exits **1** on the same line. The CLI is 2.2.4, whose `auth`
+      subcommands are `login`, `print-access-token` and `revoke`; the repair is a browser OAuth
+      `kaggle auth login` or a fresh token from kaggle.com → Settings → API, and **only the account
+      holder can do either**. What it actually blocks: the registry's one `gated-kaggle` row
+      (`g1-v1`) and every campaign cell that wants the T4 inside the 30 h/week quota. It does not
+      block the 4 `retrain` rows — this box runs those at §9.50's wall price, which is why 10c is
+      running here at all. The status tally behind those numbers is read from `ROWS`, not copied
+      from prose: 20 `here`, 4 `retrain`, 3 `external-chrome`, 2 `external-laya`, 1 `gated-kaggle`.
+
+### P1 — Data: the accuracy unlock *(tasks #14 and #15 done)*
+The suite froze **300 train rows per source** (contrastive 432, since its generator emits a fixed
+policy grid), 80–116 in each of dev/test and 40–48 in calibration — 500–872 rows per source across
+all four splits, **6,232 rows total** (counted directly on the pinned checkout; an earlier draft of
+this section said "500 rows per source", which conflated the per-source total with the train split,
+now §9.10). The upstream corpora behind them hold ~2M labelled examples, and decision-v2's manifest
+lists **all 11 sources as trainable** with `holdout_sources: []` and explicitly disclaims any
+decontamination claim.
+
+**Done — the pilot slice is on disk** (`bench/pull_upstream.py`, `9e954f9`; corpus in
+`data/decision-v2-pilot/`, and **all six of its files are tracked in git** — `train.jsonl` 82,917,730 B,
+`development.jsonl` 1,700,635 B, `test.jsonl` 1,705,815 B, `calibration.jsonl` 623,092 B,
+`tokenizer-8192.json` 526,662 B, `upstream_manifest.json` 7,739 B; `.gitignore` carries no `data/` pattern
+at all, so this is the opposite of `runs/*`, which it does exclude — the corpus travels with the clone).
+Every figure below is printed by that run and re-read from `upstream_manifest.json`, not transcribed from
+a log:
+
+| item | target | measured |
+|---|---|---|
+| train states | ≥ 55,000 | **57,904** = 54,472 upstream + 3,432 frozen-suite train |
+| questions | — | **73,804** |
+| state tokens (suite's own Qwen2.5 tokenizer) | ≈ 4.1M | **4,246,106** (median 49 · p95 263 · max 402) |
+| tokens per parameter | — | **0.28** (was 0.017) |
+| rows in eval after the pull | 0 | **0** |
+| upstream rows already in frozen train | 0 | **0** |
+| repeated states within the pull | 0 | **0** |
+| round-trip (re-read files, re-digest) | exact | **exact** |
+
+Per-source `~5k` hits its target for all ten downloaded sources; `contrastive` is generated and
+admits **4,472** of 4,800 (the 328 dropped are its collisions with eval + frozen train, below).
+
+- [x] Add `datasets`; pull ~5k upstream train rows per source from the **pinned HF revisions** in
+      `manifest.json` (revisions recorded per source in the pull manifest).
+- [x] Re-express each through the suite's own question definitions so the eval format matches —
+      by *calling* `kev.data.build` / `kev.contrastive.generate` at the pinned suite rather than
+      reimplementing the converters, so the format cannot drift. A parity test runs our `admit()`
+      against `kev.suite.select_unique` on identical inputs.
+- [x] Exact-state dedup against `development.jsonl` + `test.jsonl` (+ `calibration.jsonl`), and
+      against the frozen `train.jsonl` we now append to — **printing the collision count**. The
+      gate is on *both* keys, because they disagree in both directions:
+      `_meta.text_sha256` hashes an upstream *field* (yelp/imdb/amazon hash the full review then
+      cut to 220 words → one state, two hashes; contrastive hashes the case sentences but not the
+      policy → one hash, two states). Collisions actually found and excluded: boolq 150 eval + 497
+      already-in-frozen-train + 726 duplicate states, mnli 44/322/329, banking77 40/300/4,
+      contrastive 39/52/73, agnews 40/301/1, sst5 42/300/3, trec 43/307/26, imdb 42/297/16,
+      amazon 40/300/10, yelp 40/300/0, dbpedia14 40/300/0.
+      **Methodological find:** the frozen suite itself ships 1 `text_sha256` shared between a train
+      row and an eval row (their states differ, so it is not a leak — but it is why deduping on
+      that key alone would let a real leak through, and it is the number the `--per-source` gate
+      would have printed 0 for).
+- [x] Instruction paraphrase augmentation with the **exact suite wordings held out** for eval —
+      this separates "learned the template" from "learned to read". *(task #15, done)*
+      `src/myna/paraphrase.py` ships **9 phrasings for each of the 17 templated cores** (agnews 5,
+      contrastive 4, yelp 2, one each for amazon/banking77/dbpedia14/imdb/sst5/trec) plus 9 frames
+      each for the two per-row-content sources, where only the frame moves and the row's own
+      question/hypothesis is reproduced **verbatim** so no phrasing can shift a gold.
+      **Index 8 of 9 is reserved**: training draws 0..7, and dev is scored twice — on the suite's
+      exact strings and on that unseen one (`metrics.json:dev_unseen`).
+      Coverage, measured on the pilot through our own adapter: **17,112 sets / 19,596 question
+      shapes / 57,904 rows / 73,804 labelled slots** paraphrased, **84,936 distinct training
+      wordings, 0 of them a dev, test, calibration or train suite string**. The 10,629 distinct
+      instruction strings on disk are 10,600 boolq/mnli row content (5,300 + 5,300) and 17 cores.
+      An instruction with no table entry raises `UnknownSchema` rather than passing through: a
+      silent pass-through would train on the eval wording and void the gate.
+      Trainer wiring: `--paraphrase off|on` on **both** batch paths, variants pre-built so the
+      `id()`-keyed length cache stays valid, and `worst_case_tokens` pricing every set at its
+      **longest** phrasing so `--max-q-cells` remains an upper bound rather than a hope. The run
+      prints `paraphrase: N question sets re-worded …` *and* `paraphrase: D phrasing draws reached
+      the batches over U updates executed (of S requested…)`, with all three in `metrics.json` — the
+      warm-up line alone would
+      still print if the loop never consulted the table. `--long-context` refuses `--paraphrase on`
+      instead of claiming a gate the needle corpus cannot run.
+      Witness: `bench/mutation_paraphrase.py`, **32/32 caught** (§9.12 for the false-green first
+      pass, which is what found the two real holes: boolq rows whose question *ends* with one of
+      the suite's randomized suffixes were having that suffix edited, and content frames whose
+      nine variants all ended the same way; §9.58 adds the three that pin the draw-rate
+      denominator).
+- [x] Pilot corpus target: ≥ 55,000 states ≈ **4.1M tokens**, vs 0.26M before — **57,904 states /
+      4.25M tokens, measured** (§6 recomputed from it).
+
+**What the pilot does *not* fix, measured.** Loading it through our own adapter gives
+**17,112 exact-signature question-sets over 57,904 rows: median pool 1, 96% singletons.** The rows
+are not unique tasks — grouping on instruction *schema* instead of exact tensors gives 10,668
+schemas whose largest holds 5,300 rows (amazon/dbpedia14/imdb/trec 5,300 each; yelp 4,512;
+banking77 4,497; sst5 4,490; contrastive families 1,158–1,302). So 16× more data lands in the same
+batch-of-1 shape that throttled V1-B: **P2 is now the binding constraint, not an
+optimization.** boolq and mnli are the permanent half of it — their instruction text genuinely
+*is* the per-row question, so no regrouping can ever make them batchable.
+
+### P2 — Architecture: per-row question tensors *(done; unblocks boolq/mnli)*
+- [x] `q_ids/q_mask/span_mat/opt_valid/decide_idx` gain a leading batch dim, with masks so a batch
+      can mix question-sets. `tokenizer.batch_question_tensors` builds `[B,N,Lq]`, `[B,N,O,Lq]`,
+      `[B,N,O]`, `[B,N]`, padding on all three varying axes; the shared `[N,·]` form is still
+      accepted and broadcast, so the engine, MLX mirror and serving path are untouched.
+      `train.build_row_batch` pairs it with a `has_gold` mask, and `--row-batch` draws one
+      mini-batch across the whole train split instead of one question-set at a time.
+- [x] Equivalence test: a homogeneous batch scores identically before and after (atol 1e-6).
+      Three directions, in `tests/test_perrow_batch.py`: shared form vs per-row form on a
+      homogeneous batch; every row of a mixed batch vs that row scored alone; and the mixed-batch
+      loss equals the cell-weighted mean of the single-row losses. **13 mutations of the new code
+      were run and all 13 were caught** — including `decide_idx` → zeros and the pooled-span
+      mutation, which the invariance tests cannot see by construction and which
+      `test_engine_parity` catches against the independent readout implementation.
+- [x] Re-measure memory (`bench/mem_profile.py`, one subprocess per config, `ru_maxrss` peak at
+      `d_model` 384 / vocab 8192 / batch 8). **The plan's assumption was wrong** (§9.9): the option
+      axis is nearly free and the *question branch* is what fills the machine.
+
+| axis | retained activations, measured |
+|---|---|
+| per question-token position (`B × N × Lq`) | **1.6 MiB** |
+| per state-token position (`B × Ls`) | **0.8 MiB** |
+| per option cell (`B × N × O`) | **3 KiB** |
+
+  At the pilot's shapes and a 2,048-cell question budget (`--max-q-cells`, the unit
+  `draw_row_batch` now enforces), `bench/pilot_topology.py` measures how many rows of each source
+  fit in one forward: **boolq 64, mnli 49, imdb 64, contrastive 64, sst5 64, yelp 28, trec 24,
+  agnews 23, dbpedia14 37, amazon 53, banking77 4** — against a median pool of **1** row under the
+  old shared-set contract (17,112 exact-signature sets, 96% singletons). boolq and mnli go from
+  one row per forward to a full batch; banking77 is the exception, because its 77 option
+  descriptions make one question 431 tokens long.
+- [x] Corollary for P3, stated as arithmetic: a batch of 32 rows at the pilot's p95 state length
+      (263 tokens) retains ~6.6 GB in the state scan (32 × 263 × 0.8 MiB), ~10.0 GB at the
+      402-token max. A step directly measured at `B=32, Ls=48, N=3, Lq=64` peaked at **11.2 GB**
+      of resident memory including weights, gradients and Adam state — which is the M5 crash,
+      explained. P3 therefore runs either `--batch ≤ 8` on full states or the truncated-backprop
+      path (`forward_truncated`, already built) so only the grad window is retained.
+
+### P3 — Train and validate *(code done and witnessed here; the run itself is `KAGGLE`)*
+- [x] **3a** `train.py` runs on CUDA without edits. The device path is witnessed on this box:
+      `--device auto` considers CUDA (`59240e1`), an explicit unavailable name fails loudly with the
+      list of what the machine has instead of silently downgrading, and `free_device_bytes()` reads
+      `torch.cuda.mem_get_info()` — pinned by a monkeypatched-CUDA test that asserts the plan uses
+      *free* bytes and not total, and that a `RuntimeError` from the driver degrades to `None`
+      ("no headroom reading", `--batch` taken as given). The same flags as the box
+      (`--row-batch --max-q-cells 2048 --accum-groups 2 --group-sample uniform --paraphrase on
+      --free-gib 10 --mem-safety 0.5 --save-every 1 --stop-factor 1.5`) run 3 CPU updates green.
+      The GPU half of the witness is `KAGGLE`.
+- [x] **3b** `kaggle/` bundle. `run.py` is the one-command entrypoint: it refuses to start without
+      `EXPERIMENT_NAME`, refuses a corpus that is missing a split (naming the file, never falling
+      back to the synthetic data), composes the measured flag set, adds `--resume` exactly when
+      `model_last.pt` exists, tees the trainer to `runs/<name>/train.log`, writes `run.json`, and
+      propagates the trainer's non-zero stop exit. `package_dataset.py` stages the pilot corpus,
+      writes `SOURCE_SHA256.json` **from the corpus** plus `dataset-metadata.json`, verifies every
+      staged byte, and prints the upload command instead of running it.
+      Witness: `16 passed` in `tests/test_kaggle_bundle.py`, including a real 2-update CPU training
+      through the entrypoint and a lossy-copy build that exits non-zero. Gate:
+      `bench/mutation_kaggle_bundle.py` → **25/25** (first pass 21/25; §9.15). That figure is the
+      state of P3's list, not a re-runnable number: the harness could not reach the end of its own
+      `the dry run runs the job` mutant until §9.40 capped what the catching test was willing to
+      launch. Current: **48/48, exit 0** (42 inherited + P10's six), in
+      `runs/mutation_kaggle_bundle.log`.
+- [x] **3c** Python 3.11. `requires-python` is `>=3.11` (it was `>=3.13`, which made the box's own
+      interpreter a *silent fallback*), every file under `src/ tests/ bench/ kaggle/` parses under
+      `feature_version=(3, 11)`, and `bench/check_python311.py` runs the whole thing on a real 3.11
+      interpreter: prints **`PASS: the package imports, compiles and trains on python 3.11`** on
+      3.11.15 / torch 2.6.0, and exits 2 rather than skipping if no 3.11 is found.
+      What 3c does **not** claim is the image's own version: the one box that ran printed 3.12 in
+      session output that was never committed, so a version assertion here would be a remembered
+      number, and `run.py --check` prints the interpreter on the box instead — which is what the
+      cell `kaggle/campaign.py` generates now runs.
+      Witness: `runs/python311_check.log`, whose first line is the command that wrote it.
+      Reproduce (`MYNA_PY311` points at the interpreter; it refuses rather than reporting a
+      silent skip, and the GPU half of the same check stays `KAGGLE`):
+
+      ```bash
+      uv run python bench/check_python311.py
+      ```
+
+- [x] **3d** Memory-safe sizing as a computed startup line. `state_token_p95()` measures p95 over a
+      4,000-row sample of the rows the loop will draw (p95, not the mean, because the batch pads to
+      its longest row); `rows_that_fit()` divides `safety × free` by `p95 × 0.8 MiB` **after**
+      subtracting the question branch (`--max-q-cells × 1.6 MiB` on `--row-batch` steps), both
+      prices from `bench/mem_profile.py`. Three outcomes, all printed: the batch fits, it is clamped
+      down with the number it was clamped to, or — when the reserve alone eats the budget — the run
+      **refuses** and names the knob (`lower --max-q-cells`). No headroom reading is an explicit
+      line, not an invented number.
+- [x] **3e** Stop rule in the loop: after each update, hard-stop if the last step time exceeds
+      1.5× the median of the previous 20, or if measured free bytes fall below 1.25× the projected
+      per-step need. The stop writes `model_last.pt`, prints the reason, and the process **exits
+      non-zero** — a truncated run that reports success is how a dead job becomes a "result".
+      Witnessed by construction: `--stop-factor 1e-4` over 30 steps makes the 21st update a
+      violation, and the default factor demonstrably lets a normal run finish.
+- [x] **3f** Cadence and resume: `--save-every` defaults to 25 (≤ 50 as the spec demands) and the
+      snapshot carries weights, config, temperature, step, **optimizer and scheduler**, so
+      `--resume` continues the cosine decay instead of restarting it and does not replay the
+      snapshotted update (`start = stored step + 1`). Pinned: a round-trip at step 17 recovers the
+      Adam moments and the scheduler's `state_dict()`; a missing snapshot is a named refusal, not a
+      `torch.load` traceback.
+- [x] All five gates above are mutation-checked by `bench/mutation_memory_plan.py`: **44 mutations,
+      all caught**, run inside a scratch copy of `src`+`tests` (the repo's own `pythonpath = ["src"]`
+      outranks `PYTHONPATH` — §9.12), with a green-baseline guard and an abort-if-the-first-mutant-
+      survives guard so a battery that mutates nothing can never report a clean pass.
+- [x] **3g** Stratified reporting harness: per source × question-type, groupable (9/11) vs
+      per-row-instruction (boolq, mnli), majority/uniform floors in the same table — inference only,
+      so runnable here against v0 and against any Kaggle checkpoint. `src/myna/report.py`
+      (`python -m myna.report --suite … --split test --metrics <run dir> [--laya <witness>] [--out j]`).
+      Witnessed, in the table itself: the published floors re-derive from the shipped rows
+      (**majority 0.433 exactly as §4.2, uniform 0.332** — see §9.16), laya's own per-cell accuracies
+      reproduce their margins over the floor (imdb 0.550 over 43/80, boolq 0.575 over the same), the
+      9-vs-2 stratum split is *measured* from instruction strings rather than named (agnews: 8 distinct
+      instructions over 300 labelled slots while its 116 rows sit in 113 exact-signature sets — §9.17),
+      and the six cells whose option counts differ across their sets are printed with their full
+      histograms because the chance floor is row-weighted over them. Gate: `bench/mutation_report.py`
+      — **93 mutations over `src/myna/report.py`, all caught, exit 0**, run against a frozen repo
+      (§9.18 is the process correction that bought that discipline; 54 of them are 3g's, P8 8c added
+      the 13 that cover the competitor line and the §9.32 merge — which is also why the laya
+      per-cell figures below moved by 0.008–0.009 — and §5 P9's 9b/9c added the 26 that cover the
+      clip column, the Brier column and the table's geometry, §9.34).
+- [ ] **3h** The default-config model (**15.35M** at vocab 4096; v0's artifact is **14.45M** at its
+      1,740-entry tokenizer — §2.1 names both) against the ≤ 32M allowance, head-to-head on
+      identical data — `KAGGLE`.
+- [ ] **3i** G1 verdict: decision-v2 **test ≥ 0.70** macro, ≥ +0.15 over the 0.4331 majority floor,
+      per-source table published — `KAGGLE` result, reported as measured or as a loss.
+
+**Why the sizing formula changed.** The line above formerly read
+`free_bytes / (0.8 MiB × state tokens)`, which is the *state scan* alone. A `--row-batch` step holds
+the question branch at the same time — that is what the M5 crash was (§9.9) — so the batch the spec
+asked for was sized as though half the model were free. The reserve is now subtracted before rows
+are counted, and if nothing is left the run refuses. See §9.14.
+
+
+### P4 — Latency reconciliation *(task #17, gates G2)*
+- [x] Re-run myna vs laya on one box, one process, direct `Agent` call (not `Router`), matched
+      state length / question count / dtype / options-per-question.
+      **4a witness:** `bench/bench_latency_matched.py`, one M5 process, device `cpu` for both, both
+      weight dtypes *reported* rather than assumed (`torch.float32` each, laya's autocast off), the
+      same `str` state object and the same question `dict` handed to both engines (3-option `choice`
+      alternating with `noul`, exactly laya's own `bench_latency.py` ladder), laya called as
+      `Agent.system_one` on checkpoint `55cf4c4`. Ladder capped at 1024 tokens so **no row compares
+      myna reading a document against laya reading a prefix of it** — the harness derives
+      `usage.input_tokens / questions` per row and would label a plateau `laya_truncated`; no row
+      was labelled. Reproduce with
+      `PYTHONPATH="<laya checkout>" .venv/bin/python -u -m bench.bench_latency_matched` (without
+      laya importable the harness runs the myna half and **withdraws the ratio**, which is the
+      §9.1 behaviour, not a failure). Artifacts `runs/latency_matched.{json,md}` (run 3) and
+      `runs/latency_matched_run1_superseded.{json,md}` (run 1), both committed. Ratio, recomputed:
+      **3.04× / 3.21× / 4.12× / 3.60×** end-to-end at 1 / 5 / 10 / 50 questions, and
+      **6.78× / 4.67× / 4.75× / 3.65×** against laya's same call from myna's ask-only path — each
+      cell the **worse of the two runs**, because the two runs disagree by up to 22% in absolute p50
+      while other sessions share these cores, and a busy laptop must not get to pick the flattering
+      number (§9.23). The internal drift check re-measured the first shape at +1.9% (myna) and
+      +12.6% (laya) in run 3, −0.7% / +1.8% in run 1 — that spread is why the absolute column is not
+      the claim.
+      Gate: `tests/test_latency_matched.py` **26 tests**, `bench/mutation_latency_matched.py`
+      **34/34 mutations caught, exit 0** on a frozen repo (`runs/mutation_latency_matched.log`). The
+      battery's first pass scored 30/31 and the
+      survivor was an uncovered branch (`fit_cost` guarded the question axis against a zero-variance
+      column but not the state axis), now pinned both ways; the three newest mutations are the
+      single-instance lock, which exists because a duplicate harness run was caught mid-measurement.
+- [x] Separate fixed per-call overhead from per-token and per-question cost.
+      **4b witness:** least squares on the ladder, `t = fixed + per_state_token·L + per_question·Q`,
+      run 3 with run 1 in brackets.
+      myna **observe**: 360.4 [548.5] µs/state-token, R² 0.9979 [0.9996] — with a *negative*
+      intercept, because within a 256-token chunk the scan is quadratic: doubling the state costs
+      2.85× [3.40×] at 66→133 tokens and 2.82× [2.85×] at 133→265, then stops compounding once the
+      state spans several chunks (1.93× [1.72×] at 265→530, 1.97× [2.20×] at 530→1060; §9.22, and
+      the reason myna's ~33 ms decision figure is a *short-state* result).
+      myna **ask**: 10.12 [9.29] ms fixed + 9.59 [12.15] ms/question with a state slope of −10.3
+      [−4.0] µs/token, i.e. zero within run noise — the fixed-size state claim, measured, on both
+      runs. myna **end-to-end**: 4.82 [1.89] ms + 368.4 [528.2] µs/token + 8.94 [9.74] ms/question,
+      R² 0.9915 [0.9794].
+      **laya's additive fit gives R² 0.7356 [0.7297]**, which is the structural point: its cost is
+      state × questions (one sequence carrying the whole state, per question), so the ladder's
+      530-token rows read 289 [507] ms at 1 question and 2,563 [3,151] ms at 10.
+- [x] Until then the only latency sentence allowed in public: *myna on a laptop CPU has roughly the
+      per-decision latency laya reports on a datacenter T4.*
+      **4c: superseded by measurement, partly.** The first half of that sentence is now *stronger
+      than the constraint and still conservative*: at a 1-question / 87-token decision myna measures
+      **33.1 ms** on the M5 CPU (run 1: 38.3 ms), inside laya's published T4 39.5 ms on **both** runs,
+      and **3.04×** faster than laya measured on this same box. The T4 margin stays context only —
+      cross-silicon, never a denominator (§4.3) — so what G2 actually carries is the same-box ratio.
+      What does **not** survive is §2.1's other projection (**≥ 5× at 50 questions, §9.21**): myna's
+      50-question p50 is 870 ms (run 1: 812 ms) against laya's 771.3 ms on a T4, i.e. myna takes
+      13% (5%) *longer* than laya took on datacenter silicon, and against laya on this box the ratio
+      is 3.60× — with a per-extra-question marginal of 17.1 ms (15.8) against laya's 71.2 (57.3), so
+      even the *slope* ratio never reached 5× here.
+      Also withdrawn with it: the README's 33×–239× long-context column, which compared myna
+      reading a document against laya truncating it (**§9.20**).
+      And the sub-40 ms figure is a *1-question, 87-token* result: at 50 questions the state is
+      irrelevant and the question branches are the whole cost (ask-only 787 ms, run 1: 801, §9.22).
+      Quote a shape, not a number.
+
+### P5 — Abstention and risk/coverage *(task #16, gates G5 — the flagship scenario)*
+- [x] **5a** Confidence threshold tuned on `calibration.jsonl`; emit `abstain` with the reason.
+      `Myna(ckpt, device, abstain_below=t)`: the default is `None`, which never abstains — the latency
+      and parity paths must answer every question, because an engine that can quietly stop answering
+      would invalidate those measurements (§4.3, `bench_latency_matched.require_full_answers`). With a
+      floor set, the committed field goes `None` (`choice` / `level` + `score` / `yes`) and every
+      answer carries `confidence`, `margin` (the runner-up gap), `abstain` and a `reason` quoting the
+      measured numbers, so a caller that ignores the flag fails at the seam instead of shipping a
+      label the model refused to commit to. `ask()` echoes `policy.abstain_below` and
+      `policy.abstained`; `myna.serve --abstain-below` and `/v1/health` carry it, because the HTTP
+      surface is where a fast path could go silent on the way out. noul is the trap this caught in
+      draft: its `confidence` is the probability of the *side committed to*, `max(p, 1-p)`, not
+      `p(Yes)` — pricing it the other way abstains on the model's surest "no"s, and
+      `test_a_confident_no_is_not_an_abstention` pins it by sharpening the real head
+      (`temperature=1e-3`) rather than a dictionary. **Witness:** `tests/test_abstain.py` (19) +
+      `tests/test_serve.py` (6, four of them the abstention path over HTTP and the CLI flag
+      that feeds it).
+- [x] **5b** Risk/coverage curve in the README table, not just an accuracy number.
+      `bench/risk_coverage.py` — one pass over a labelled split, ranking each question by its
+      committed-side probability, with the per-source cut G5 is written against. Two things make the
+      table mean something rather than being a plot: the ranking quantity is **recomputed** from the
+      printed distribution and cross-checked against the engine's own `confidence` field per answer
+      (a divergence raises), and the chosen floor is **re-run on the engine**, which must abstain on
+      exactly the count the curve withheld. Measured on v0 / `calibration.jsonl` (448 rows, 568
+      questions): accuracy **0.349** at full coverage rising to **0.596** at 10% — the confidence
+      carries information on a checkpoint that cannot do the task — and the 0.693 floor re-run gives
+      **227 engine abstentions against 227 curve rows below the floor** (§2.2, §9.24). **Witness:**
+      `runs/risk_coverage.{md,json,log}`, `tests/test_risk_coverage.py` (21 tests against a synthetic
+      oracle, including both G5 boundaries landed on exactly).
+- [x] **5c** Fallback seam to a stronger model, with the chosen model labelled per decision. A fast
+      path that is uncertain must never be silently load-bearing. `src/myna/fallback.py`:
+      `Decider` is the seam, `DECIDERS` the registry (`myna`, `laya`), and `Fallback.predict` re-asks
+      the secondary **only** the abstained questions, labels every answer with the engine that
+      committed to it, and reports `routing.still_abstained` when both refuse rather than dropping the
+      row. `LayaDecider` wraps `Agent.system_one`, not `Router` — §9.1's equal-footing rule applies to
+      the fallback path too, since a router's label would name the router rather than the thing that
+      answered. **Witness:** `tests/test_fallback.py` (15).
+- [ ] **5d** G5's pass condition measured on banking77 + dbpedia14 + trec — needs the real-trained
+      checkpoint, so `KAGGLE`-gated. The harness is provably correct against a synthetic oracle first
+      and mutation-checked second: **49/49 mutations caught** (`bench/mutation_p5.py`,
+      `runs/mutation_p5.log`) across the engine's commitment, the seam's labels, the transport and
+      the curve's boundaries. v0's own numbers are in §2.2 and they are a `NOT MET`, not a pass: its
+      full-coverage accuracy on the gate's three sources is 0.000 / 0.025 / 0.150, which is *under*
+      both floors of those cells on this split (uniform 0.013 / 0.071 / 0.167, majority-class
+      0.075 / 0.125 / 0.300 — both recomputed from the shipped rows by `myna.report.cell_stats`, not
+      quoted from the class counts). Abstention cannot rescue accuracy that is below guessing, and
+      the artifact says so in the same breath as the curve.
+
+### P6 — Browser/on-device deployment *(task #18, gates G3)*
+- [x] **6a** ONNX export of the two graphs, with torch-vs-ONNX parity measured rather than
+      assumed (`src/myna/onnx_export.py`; `runs/onnx_parity.json`, `runs/onnx_export.log`).
+      The split *is* the architecture: `state_step.onnx` takes a fixed 256-token chunk plus the
+      fixed state stack and returns the next state — a 16k document is 64 calls to the same
+      weights, never a graph that grows — and `question.onnx` resumes from that state, leaving
+      the pointer head (a few matmuls over span means) to JavaScript beside the spans.
+      Measured at chunk 256, 8 questions × 64 tokens, opset 18, `runs/myna-v0` (14.45M), on the
+      shared-weight artifact 6b ships: chained scan of 853 tokens over 4 chunks with a padded tail
+      **|Δ| 7.32e-04 = 1.63e-06 relative** on a state of scale 449; question branch **2.83e-05
+      absolute = 4.58e-06 relative**; masked-row inertness **exactly 0.0**; and the number a caller
+      acts on — option probabilities through the pointer head — **8.94e-08**. (These are the numbers
+      `runs/onnx_parity.json` and `runs/onnx_export.log` print today; 6a's first pass recorded the
+      same properties on the duplicated-trunk graphs at 3.13e-06 / 1.88e-05 / 1.86e-07, and the file
+      was re-derived after sharing rather than left as a memory. The per-chunk wall-clock figure the
+      run also prints is quoted nowhere, because §9.23 established that this box's absolutes move by
+      3× under load and G3's cost claim is measured in Chrome.)
+      That last figure is why the
+      gate is split in two units: the state's entries reach ~4.5e2, so asking 1e-4 of it
+      absolutely demands bitwise agreement between two BLAS implementations, and G3 would read
+      as an unbuildable target instead of a checked one.
+      Three findings the export forced, none of them in the original plan:
+      * **`dynamo=True` is required.** The legacy TorchScript exporter emits graphs this trunk
+        needs that `onnxruntime` refuses to load (`/fwd/Mul_2 … Incompatible dimensions`), so
+        the "successful" export would have failed on the reader's machine instead of ours.
+      * **`opset 17` was a label, not a fact.** torch warns that 17 is below its implementations,
+        writes 18, and its version-converter fallback aborts; `meta.json` now records the opset
+        read back out of the file (`opset_actual`) rather than the one requested.
+      * **Byte budget: 93.7 MiB fp32, and it is two copies of the same trunk** (state_step 35.6
+        + question 58.13). §2.1's ≤ 20 MB int8 target is not reachable by quantising both graphs
+        independently — the weights have to be shared, or the browser has to carry one graph and
+        call it twice. That is 6b's problem, now measured instead of assumed. On the narrower
+        profile 6b actually ships the same comparison is 93.2 MiB unshared against **59.32 MiB**
+        shared, and that is the pair §2.1 quotes; 93.7 belongs to 6a's own 8 × 256-token export.
+      What 6a left open, and 6b closed: the widest request the suite contains is `banking77/intent`
+      at **1,067 tokens** (77 options), measured over `calibration.jsonl`, which does not fit the
+      64-token question width this profile exports — `runs/onnx_parity.json` records it as
+      `"measured": false, "graph_width": 64`. The same request through a graph wide enough to carry
+      it (width 1152, `runs/onnx_parity_widest.json`) is measured at **4.25e-07** on option
+      probabilities, so real-width parity is a profile choice with a price in peak tile bytes
+      (3.00 → 12.0 MiB) rather than an unproven claim.
+- [x] **6b** Measured in Chrome via `onnxruntime-web`: download bytes fp32/int8, cold-load ms, p50
+      per decision on a real page, with the two things 6a proved necessary both closed.
+      * **The duplicated trunk is gone.** `onnx_export.share_weights` rewrites both graphs to read
+        their initializers from one `weights.bin`, deduplicated by the SHA-256 of each tensor's
+        bytes — sound because initializers are constants that no node writes. Sharing is then
+        *counted by content region, not name*: `dynamo` numbers initializers `val_N` per graph, and
+        on this artifact **36 initializer names are common to the two graphs while only 33
+        byte-regions actually are** — a name intersection measures the exporter's counter, not the
+        sharing. `min_bytes = 4096` keeps shape-inference constants inline, because onnxruntime
+        refuses to read them from an external file. Artifact on the shipped profile:
+        **93.2 → 59.32 MiB**, of which `weights.bin` is 54.32 MiB transferred once.
+      * **Parity at the widest real request.** The `banking77/intent` question 6a left as
+        `"measured": false` — 1,067 tokens, 77 options — is now exported at the width it needs
+        (graph width 1152) and measured: decision probabilities **4.25e-07** absolute, chain
+        **4.25e-06** relative on a state of scale 287, `runs/onnx_parity_widest.json` with
+        `"measured": true`. `--scan-chunk` stays the tab's memory knob: 3.00 MiB peak tile at the
+        shipped profile, 12.0 MiB at the wide one.
+      * **The page is a second implementation, and it is checked as one.** `browser/bpe.js` rebuilds
+        the ByteLevel BPE from `tokenizer.json` alone (separators deleted rather than turned into
+        `Ġ`, byte→symbol identity for the printable ranges, no `max_word_length` cutoff because this
+        tokenizer writes none and a 260-character word merges normally); `browser/head.js` runs the
+        pointer head and the abstention gate out of `head.bin`; `browser/myna.js` chains the scan.
+        `browser/parity.mjs` is the single witness both `node browser/selftest.mjs` (7 checks) and
+        the tab (6 — the on-disk byte comparison needs a filesystem) import, so a green tick in
+        Chrome is produced by the code the build gate fails on. Node: 1,243 tokens across 32 strings
+        and 3 question layouts identical, chained state over 525 tokens in 3 calls within
+        **2.86e-05** relative, decisions within **1.03e-06**, abstention reproduced at three floors,
+        every fetched file byte-equal to the file on disk.
+      * **Chrome, cold cache, throwaway profile** (`bench/browser_g3.mjs`, CDP over Node's own
+        WebSocket, `Network.loadingFinished.encodedDataLength` as the byte witness):
+        **Google Chrome 153.0.8010.53**, onnxruntime-web 1.30.0, four rows — COOP/COEP-isolated and
+        plain, 1440×900 and 390×844, 15 decisions each. Artifact **59.32 MiB**, wire **73.09 MiB**
+        with the **13.58 MiB** wasm runtime counted separately and never folded into the model's
+        figure, `weights.bin` requested **exactly once** in all four rows, cold load 254–394 ms,
+        p50 **436/426 ms** on 10 threads against **742/743 ms** single-thread. Screenshots:
+        `docs/screenshots/{isolated,plain}-{1440px,390px}.png`; witness `runs/browser_g3.json`,
+        which carries `uptime`'s load average (5.30 at the time of the run; the int8 sweep beside it
+        ran at 7.58, and each file records its own) next to every millisecond in it, per §9.23.
+      * **int8 was attempted, and it is a byte win only** — see §9.28.
+      * **Gates.** `pytest` 295 passed / 1 skipped (the KEV-gated parity test),
+        `node browser/selftest.mjs` 7/7 (`runs/browser_selftest.log`), `bench/mutation_onnx.py`
+        **22/22**, and `bench/mutation_browser.py` **24/24** (`runs/mutation_browser.log`) across
+        five clusters — tokenizer, chain, head, abstention, mount + bytes. Its first pass left
+        three survivors, two of which were the instrument's blind spot rather than the code's;
+        §9.27 records all three and the coverage assertion that keeps the second kind from
+        recurring.
+      Still open, and stated rather than smoothed: the tab's own `measureUserAgentSpecificMemory`
+      reading (176 MiB) counts JS-managed heap only and does **not** attribute the 54 MiB mounted
+      into the wasm heap, so no total-tab memory figure is claimed here; plain mode has no memory
+      API at all, which is printed as `n/a (API absent in this browser)` rather than as zero; and
+      every probability above is v0's, so a green G3 is a working artifact, not a shippable model.
+- [x] **6c** MLX int8 path for Apple, re-measured after any parameter growth — the path is
+      built, and the measured verdict is **bytes yes, milliseconds no**:
+      * **The artifact.** `MynaMLX.quantized_()` runs `mx.quantize` over every 2-D weight the
+        engine *multiplies by* — `trunk.tok.weight` stays fp32 because it is gathered, not
+        matmulled — `_linear` dispatches on the presence of `weight_q` to `mx.quantized_matmul`,
+        and `save()` writes a self-describing directory (`params.safetensors` + a `meta.json`
+        carrying `{group_size, bits, keep, n_quantized}` and both byte figures). `from_mlx_dir`
+        refuses a `bits` outside {4, 8} — the only two `mx.quantized_matmul` implements — naming
+        the file and the value it read, so a hand-edited manifest fails at load instead of
+        answering with the wrong dequantisation. 50 of 51 weights quantised at group 64 / bits 8.
+      * **Bytes: met.** `params.safetensors` goes **55.13 → 17.40 MiB** (57,805,835 →
+        18,248,977 B), **3.17×** smaller in the same container, and the reloaded artifact is
+        bit-identical to the engine that wrote it (`max |d| 0.0e+00` on logits, printed by the
+        bench and asserted by the test).
+      * **Latency: not moved.** MLX over torch-MPS on the same checkpoint and the same box,
+        per-row *minimum* across two committed runs (`runs/bench_mlx_int8.md`,
+        `runs/bench_mlx_int8_run2.md`; load average 4.55 and 3.94 at print, §9.23):
+        fp32 **1.76–2.22×**, int8 **1.79–2.41×**. int8 − fp32 changes sign between the two runs on
+        4 of the 7 state lengths (+2.6% → −9.3% at 4096, −1.6% → +1.9% at 512) while fp32's own
+        run-to-run spread reaches **15.2%** on that 4096 row, so no "int8 is faster" claim survives
+        the two files and none is made.
+      * **Why, measured rather than argued.** `bench/diag_mlx_int8_gem.py` times the model's own
+        six linear shapes with 200 matmuls queued and one sync (holding every node: evaluating
+        only the last array leaves the other 199 unreferenced and unrun, and the broken probe read
+        0.4–3.1 µs/op with int8 up to 1.31× ahead where the fixed one reads 3.3–28.7 µs/op).
+        **5 of 6 shapes are slower quantised** —
+        ratios fp32/int8 **0.43–1.06** — while reading 3.6× fewer weight bytes. The kernel gets
+        **10–37 GB/s** of weight read against fp32's **55–257 GB/s** on the same box at the same
+        load, so the unpack costs more than the smaller read saves. Weight-only int8 removes bytes
+        from the weight traffic and no MACs; at 16–128 rows per call these GEMMs are not waiting
+        on the bytes it removes.
+      * **Agreement cost.** 14 `calibration.jsonl` rows / 20 questions answered at their own state
+        and question widths (no padding to a fixed shape): port error (fp32 vs torch-MPS)
+        **1.20e-03**, quantisation error (int8 vs fp32, same device and same stream) **9.24e-03**,
+        int8 vs torch **9.48e-03**, and **1 flip in 20 choices**. The flipped row is a 2-option
+        boolq question at 283 tokens whose reference top-two margin is **0.0008** against torch and
+        **0.0001** against fp32 — quantisation moved a coin, which is exactly what a
+        probability-error bound alone cannot see.
+      * **One null result, stated.** The gate projections were the obvious suspect (their output
+        feeds a sigmoid carried multiplicatively across the whole state). Keeping `.gate.weight`
+        in fp32 quantises 38/51 weights instead of 50, takes the artifact back up to 22.25 MiB —
+        outside the byte target — and moves the drift from **9.24e-03** to **9.53e-03** while
+        flipping **the same row** (`runs/bench_mlx_int8_keepgate.md`). The gate weights are not
+        the carriers, so there is no cheap subset that buys the agreement back.
+      * **Consequence for the gates: none of them ships on int8.** G3's parity bound is 1e-4;
+        MLX int8 sits at 9.24e-03, ~92× over — about 7× tighter than the wasm int8 of §9.28 — and
+        refused for a different reason: wasm int8 lost on agreement, Apple int8 buys nothing at all.
+        fp32 is the artifact on both paths.
+      * **Gate.** `tests/test_mlx_int8.py` (8 — the quantised tree really holds packed uint32 and
+        exactly `_n_linear` tensors; quantising one engine leaves another bit-identical; the
+        artifact round-trips bit-exact with `meta["param_bytes_file"]` equal to the file's own
+        byte count and *unequal* to the tensor sum; `bits=6` refused; group 64 on a 96-wide input
+        refused; `--keep` honoured; and the closeness bound `max|dp| < 2e-2` sitting under the
+        smallest top-two spread on the tiny model) plus `bench/mutation_mlx.py` **14/14**
+        (`runs/mutation_mlx.log`) across five clusters — filter, dispatch (`transpose`, and
+        `group_size`/`bits` read from the artifact rather than hard-coded), the divisibility
+        guard, the manifest and its loader, and the two byte figures swapped in both directions.
+      One label was fixed on the way: `bench_mlx.py`'s markdown header said "token embedding kept
+      fp32" in prose while `--keep` was a real list, so the first run that moved the flag would
+      have printed the old default — the §9.26 class of defect, now printing what it ran with.
+      **Re-measure trigger stands:** the ratios above are v0's 14.4M-parameter artifact, and §2.1
+      carries them as such.
+
+### P7 — Long-context proof *(gates G4)*
+- [x] **7a** `bench/eval_needle.py` recall-vs-length curve, swept 128 → 16,384 on the checkpoint
+      this box has (`runs/myna-v0`, `--lengths 128 1024 4096 8192 16384 --n 16`, seed 0):
+      **0.188 / 0.312 / 0.312 / 0.125 / 0.062** against a 0.167 uniform floor. The measured answer
+      is that G4 cannot be judged from this run — v0 is at chance on the *shortest* rung, so there
+      is no recall to decay, and the harness now refuses its own curve in print
+      (`baseline_verdict` → "G4: NOT MEASURED here") instead of publishing a table that reads as
+      long-context failure. This is the correction §9.25 records: the 16k number §2.1 carried was
+      a *state and cost* measurement (§9.22), never a reading one. Witnesses:
+      `runs/needle_myna-v0.{md,json,log}`; the gate is `tests/test_longctx.py` (13 — the generator's
+      evidence-uniqueness and length target, the scorer checked against an exactly recomputed share,
+      needle positions that actually spread, and the baseline guard's own boundary) and
+      `bench/mutation_longctx.py` (**20/20 caught**, `runs/mutation_longctx.log`). Two things this
+      pass also fixed in the harness rather than the model: `--lengths` so the published ladder is
+      the command that ran it (the old ladder stopped at 8k, one rung short of the claim), and a JSON
+      witness beside the markdown (G7). The guard's first battery pass scored 19/20, and the
+      survivor was mine rather than the tests': I had written `>= chance + margin - 1e-9` to spare a
+      float-equality annoyance, which made "exclusive versus inclusive" untestable by construction.
+      The tolerance is gone and the boundary is now checked on exactly representable values
+      (0.25 + 0.125 = 0.375), which is the only honest way to claim a boundary is inclusive.
+- [x] **7b** Train the 4k truncated-backprop checkpoint. **Preconditions met as code first** (§9.61:
+      1a the generator's uniform draw over fitting positions, 15 tests + 24/24 mutants; 1b the
+      suite's five claims on this loop, `tests/test_train_longctx.py` 20 + `bench/mutation_train_longctx.py`
+      24/24; 1c the smoke probe, **measured** 2.0194742679595947 s/update and 3899131392 B peak
+      footprint, not a projected band). The approved 1200-update run then executed **here**, not on
+      `KAGGLE` — cold for 425 updates, aborted at its own Stage A boundary with the 128-rung at 0.1667 =
+      the floor and the 1024-rung at 0.2167, both inside 1 s.e. (0.0481) of chance (§9.62), then resumed
+      on the owner's order to **the full 1200-update dose** (§9.63). The `KAGGLE` label on this line was
+      stale: the M5 carries a 4k needle run at 2.4 GiB retained with swap unmoved, `metrics.json`
+      `"stopped": null`, zero STOP lines on either leg. **The dose question this line left open is
+      answered, and the answer is no:** G4's thresholds are measured on the completed dose — 4096 →
+      **0.1833** against ≥ 0.90, 16384 → **0.150** against ≥ 0.85 — and step 799 and step 1199 agree
+      **exactly** on all three shared rungs (9, 13, 11 of 60) after 400 more updates, with the final ema
+      1.791 equal to `ln(6)` at the printed precision. So a longer dose at this size does not reach floor
+      + margin; what limits needle retrieval here is the mechanism, not the update count. The open item is
+      therefore **not** another dose at this regime — it is whether a readout that collapses to the
+      uniform answer at 15.35M cold-started can be moved at all by `--init` (warm from the suite
+      checkpoint), which the owner ruled out for this arm and which stays untested on this path.
+      Witnesses: `runs/lc1_4k_s0.train.log`, `runs/lc1_4k_s0_resume.train.log`,
+      `runs/lc1_4k_s0.metrics.json`, `runs/lc1_4k_s0.stage{A,B_resume}.log`,
+      `runs/lc1_4k_s0.stageC_final.log`,
+      `runs/needle_lc1_stage{A,B_resume,C_final}.{md,json}`.
+
+### P8 — Write it up
+- [x] README + PLAN headline tables from committed artifacts only, each cell labelled
+      measured/projected/gated. Every headline cell now carries its own ***m***/***p***/***g*** tag
+      and the file it was copied from, and eight cells that had no artifact behind them died in the
+      pass — §9.30 lists each with the arithmetic that buried it, and §4.2's floors, §2.1's two
+      parameter counts and the fitted-vs-read distinction are stated so a derived number can never
+      again stand in for a measured one.
+- [ ] Reproduction script per table.
+      The registry side is done — `bench/reproduce.py` binds every published row to one canonical
+      command and one committed witness, `make repro` checks all of them, and the counts and the
+      one thing still open (a target that *runs* them, which 9 of the 27 rows cannot do on
+      this box) are in TODO 8b. §9.31 is what the mutation battery caught on the way. TODO 8e
+      added the fourth assertion — `--check` asks the tool behind each python row for `--help` and
+      requires every published flag to be in the answer, which is the half of "a target that runs
+      them" that is decidable here — and §9.43 is its measured negative: 20 of 27 rows are python
+      commands, all 20 accept their flags, and 7 rows say what kind of command they are instead.
+      TODO 8f closed the seam 8e left open: the registry's counts are counted out of `ROWS` in
+      `bench/gates.py`, and `make gates` reads them back out of §2.2 — the table's one hand-copied
+      row — so a stale number there reds instead of riding along (§9.44).
+- [x] **The upstream-corpus comparison, published as three rows** — the §8 risk line's mandate.
+      README's *On the upstream corpus* section prints laya **0.667**, myna's untrained control
+      **0.346 / 0.351 (mean 0.348)**, and myna-trained as **gated on its witness rather than on
+      a run**, over the same 16
+      (source, question) cells with the 0.433 and 0.332 floors beside them, and discloses that
+      the one local checkpoint that ever saw the corpus scores **0.338** — below its own control
+      and void under §5 P1 — which is the sentence that settles what has and has not been
+      measured about this architecture. `bench/eval_scratch.py` is the control harness
+      (11 tests, 13 mutations of it all caught by `bench/mutation_scratch.py`); `--metrics-out`
+      is what lets `myna.report` read the control through the same code path a checkpoint comes
+      in by, so the two witnesses have to agree to the printed digit — and §9.32 is the
+      competitor-side bug that join found on the way.
+- [ ] Public release gate: P0 push + G1–G7 all pass or all explicitly marked not met.
+      The verdict half is done — P8 8d, and moved again at §9.69 — and it still says **no**.
+      `bench/gates.py` binds each of
+      G1–G7 to a registry row *and* to a named field read out of a committed artifact, so no
+      verdict can be greener than the witness behind it: **5 met** (G2 on the matched ratios,
+      G3 on the in-Chrome parity, G7 on the checker itself, and **G1 and G5 both on the v6
+      artifact** — G1 through `myna.report`'s own arithmetic on a dump this box re-scored
+      (`runs/v6_test.report.json` prints `g1/pass: true`), G5 through the trio curve on the split
+      the gate names (`runs/risk_coverage_v6_g5trio.json` prints `g5/pass: true` with its floor
+      re-run on the engine), each disclosed in §2.2 as borrowed-trunk and in-domain rather than
+      presented as the from-scratch engine's number), **2 not met** (G4, whose own harness prints
+      `readable: false`; and G6, which sat at `open` until §9.65 scored `v1b-kaggle-3600b`
+      on the synthetic split it was written against — **0.3423 / 0.3489 against the 0.94 the gate
+      asks for, on rows whose sha256 the same harness prints for the 0.9525 / 0.9496 baseline**).
+      Both remaining verdicts are gates the **v6 checkpoint cannot be put through at all** — its
+      engine truncates the state into a 512-token budget, so there is no 4k/16k ladder to read, and
+      the synthetic harness builds the SSM `MynaModel` from `model.pt` + `tokenizer.json`, neither
+      of which a v6 directory carries (§9.69) — which is why closing them is an architecture
+      decision and not another run.
+      `make gates` is the
+      check and SPEC §2.2 is the prose it reads. What keeps this line unticked is the release
+      itself: G4 is measured and short — the 4k needle run executes on the M5, ran the full
+      1200-update dose, and prints 0.1833 at 4k against the 0.90 the gate asks for (§9.62, §9.63) — and
+      P0's push is user-gated.
+
+### P9 — The three defects the first valid checkpoint named *(9a shipped; 9b's fix measured dead; 9c local; 9d the user's call, now priced (§9.45); 9e measured dead too; 9f–9j are TODO's ticks: G1 is now `not met` on a committed witness, one mutation battery had never finished, the last unexplained V1-B number resolved into an aggregation, the §9.40 sweep across all 14 batteries found no second unaffordable probe, and the 15th battery — 9j's, for 9d's own scope table — found its tests could not see `main()` (§9.46)*
+
+Opened by the diagnostic run against `v1b-kaggle-3600b`'s own logits (TODO 3i's lane), which answers
+the capacity question in the direction that matters: **the mechanism is not broken, the cost
+function is.** Option-order permutation tracking shows the pointer head reads option *text* — under
+permutation a cell's accuracy barely moves — so the trunk can find the answer and the training
+signal is what misprices it. **The permutation magnitudes belong to 3i's diagnostic and are
+deliberately not printed here.** The checkpoint itself now has a committed witness — its
+`metrics.json`, its roll-up and its `train.log` are in `runs/`, which is what moved G1 from open
+to measured — but the option-order-permutation numbers below came from a diagnostic harness whose
+output was never committed, so §9.30 still bars them from prose. What is structural, and
+what this repo can act on without the artifact:
+
+- [x] **9a** `score` questions are trained with a **nominal** cost. `typed_loss` is
+      `F.log_softmax(...).gather(gold)`, so over an ordered legend "predicted 4, gold 3" is charged
+      the same as "predicted 1, gold 5" — the first is one rung of a scale and the second is the
+      opposite end of it. Every other part of the stack already believes the legend is ordered:
+      `data.py` documents `options` as "for score this is the ordinal legend", and both the engine
+      and the MLX bench read a `score` as the *index-weighted expectation* over it. The loss is the
+      one component that does not, which makes this an internal inconsistency before it is a
+      research idea — and it is the only one of the three defects that a training run can fix
+      without new data or new parameters. Fix: a squared-Cramér / EMD² path over the option index
+      (`Σ_k (F_p(k) − F_gold(k))²`, normalised by `K−1` so a two-option cell and a six-option cell
+      are on one scale), selected by `--score-loss {ce,emd}` with **`ce` the default**, so no
+      published number moves and the next Kaggle run is the experiment. Note the property that
+      makes the normalisation right rather than cosmetic: at `K = 2` this expression *is* the Brier
+      score of the "Yes" probability, which is the statistic §9.24 already insists on quoting
+      beside a noul argmax. `KAGGLE` for the verdict, `here` for the code and its gate.
+      **Shipped.** `typed_loss(logits, gold, has_gold, ordinal, opt_valid, score_loss)` prices the
+      cells `ordinal` marks with the Cramér sum divided by the cell's own `K−1` and every other cell
+      with the old cross-entropy, in **one mean over live cells** — not a mean of per-cell means,
+      which a rectangular batch holding a padded question row would otherwise turn into a per-row
+      weighting. `build_batch` and `build_row_batch` emit the mask from `q.type == "score"`, the
+      loop's single call site passes flag and masks, and `--score-loss` defaults to `ce`, so the
+      published figures are untouched. Three properties are the gate rather than the formula: a
+      one-rung miss and an opposite-end miss with the *same* `p(gold)` are byte-identical under `ce`
+      (that is the defect, pinned in a test) and strictly ordered under `emd`; the worst reachable
+      price is 1.0 for every legend length; and at `K = 2` the number *is* the Brier score of the
+      second option — for noul that is "yes", which is §9.24's statistic arriving from the loss
+      rather than from a report. `tests/test_ordinal_loss.py`: 18 tests, three of which run the
+      trainer for one CPU update through a `typed_loss` spy, because the trainer seeds no torch and
+      two processes therefore never share an init — "the printed loss changed" would pass even if
+      the flag did nothing, so the call site is watched instead of its output. The absent flag is
+      one of those three: it must mean `ce`. `bench/mutation_ordinal.py` **19/19 caught**
+      (`runs/mutation_ordinal.log`). Two findings from building it: the sum is multiplied by
+      `opt_valid` because a masked tail is only *harmless by coincidence* — hand it the builders'
+      real `opt_valid` beside unmasked logits and an unmasked sum prices a cell's padding — and the
+      `[N] → [B,N]` expand that was written first is **gone**, because torch's own broadcasting makes
+      the shared and per-row forms the same tensor, no input could tell them apart, and that
+      mutation survived its own battery (§9.33). The level is 3i's: nothing published moves, because
+      nothing published was trained with `emd`.
+- [x] **9b** *Premise corrected by measurement; the readout fix is closed without being built.* This
+      box used to say that `noul` cells are scored by an argmax that collapses onto one index while
+      the continuous probability ranks, and that the fix is a threshold or a label-prior bias in the
+      readout. The follow-up diagnostic refutes both halves on most of those cells (its artifact is
+      a Kaggle-side file, so §9.30 keeps its numbers out of this prose): the argmaxes are not
+      pinned to one index, and **fitting a per-cell decision threshold on the suite's own
+      `calibration` split makes the binary cells worse, not better** — 40–52 calibration rows per
+      cell cannot estimate a threshold, and that split's class balance is not dev/test's. One cell
+      formerly cited as a readout casualty turns out to be *anti-ranked* instead, which is the
+      failure mode 9d calls dead rather than mis-ruled. What survives of 9b is the reporting half,
+      and it is still worth building: a Brier column beside every `noul` accuracy in `myna.report`,
+      because §9.24's point is that an argmax alone over-reports a binary cell either way — it just
+      is not a *fix*, and it must not be listed as one. Nothing here raises G1's ceiling.
+      **Built (the surviving half only).** `myna.report` reads `evaluate()`'s
+      `"<set>/<question>:brier"` sidecars through `brier_cells()`, weights them by the rows in each
+      question-set for the same reason `accuracy_cells` does, and prints the result in a `brier`
+      column beside every binary cell's accuracy, with the group's macro under it. The three things
+      this column can lie about are the three it is tested on: a metrics file that predates the
+      sidecars prints an **em dash** and the report says "the column is empty because this metrics
+      file has none, which is missing data and not a model that scores 0"; a sidecar whose
+      question-set is unknown to the split contributes **no weight** rather than a zero; and the
+      count on the line is `priced of noul`, never `noul of noul`. The box is ticked because the
+      surviving half shipped and the dead half is recorded as dead — the readout applies no
+      per-cell bias and no fitted threshold anywhere in `src/myna/`, and §9.24's negative result
+      stands. Where Briers exist on this box at all, they are not quotable: the diagnostic's
+      artifact is Kaggle-side and outside the repo, and the only local metrics file carrying
+      `:brier` keys is the void pre-`385e06c` checkpoint's (§9.23), which is itself uncommitted — so
+      `runs/report_void_vs_laya.log` does print a Brier column, and the registry note for that row
+      says plainly that neither its clip nor its Brier figure enters the prose (§9.30). The
+      committed control is the clean case, and it is the em-dash path: `bench/eval_scratch.py`
+      strips `:brier`/`:ece` on purpose — a Brier column off a random init is noise with a decimal
+      point on it — so `runs/report_scratch_vs_laya.json` reports `"priced_cells": 0` of its 8 noul
+      cells and the report says the column is empty because the file has none.
+- [x] **9c** Some cells score **below their own majority-label floor**. The first diagnostic named
+      four; the follow-up that corrected 9b leaves two of them standing as floor-losers and moves the
+      rest into 9d's dead-cell question, which is the right split — a cell below its floor *and*
+      below its own permutation null is not a decision-rule casualty. This is a reporting failure
+      before it is a modelling one: a cell that loses
+      to the majority answer is a cell where the model should not be answering, and G5's abstention
+      machinery already exists to say so. 9c is the `myna.report` change that surfaces it —
+      per-cell `max(acc, majority)` printed next to `acc`, and the delta labelled as the clip's
+      worth rather than the model's. Local, and its arithmetic is checkable against the committed
+      pilot split today. The boundary has to be drawn in the same sentence: *printing* the clip is
+      reporting, and it is worth exactly the arithmetic it shows; *acting* on it — predicting the
+      training-set majority whenever a cell's dev accuracy sits under its own floor — is a per-cell
+      fallback rule, which is a leaderboard decision and not a learning improvement, and 9b is the
+      evidence of what a readout rule fitted on this suite's calibration data measured. 9c builds
+      the report and stays out of the decision.
+      **Built, and it stayed out of the decision.** `roll_up` carries `clip = max(acc, majority)`
+      and `clip_worth = max(0, majority − acc)` beside the model's own number, the legend defines
+      the column on the line above the table where it prints ("It is an oracle — the floor is
+      measured on the rows being scored"), and `main()` names every floor-loser with its worth and
+      then says what the difference is: "+0.090 of arithmetic and 0 of model … a leaderboard
+      decision, not a learning improvement". Measured on what this box can measure without
+      training — the untrained control over the committed pilot split — **13 of its 16 cells answer
+      below their own majority floor**, and the clip macro is **0.4365** where the model is
+      **0.3462** and the floor **0.4331**. That last pair is the reason `clip` is its own column
+      and not the floor renamed: three cells (both `yelp` rows, `mnli/relation`) score above their
+      floor and keep their own number, so a per-cell maximum beats the average of the floors while
+      thirteen cells are losing. Those 13 are the *control's* — the two trained floor-losers the
+      diagnostics named are a Kaggle-side list and stay 9d's. `--out` carries `macro.clip`,
+      `macro.clip_worth`, `macro.brier_noul` and a `below_majority_floor` array naming each losing
+      cell, so the sentence has fields behind it (§9.30). Nothing in `src/myna/` reads the clip: no
+      fallback consults `clip_worth`, and the per-cell abstention rule this column makes tempting
+      is the user's call, listed as such under 9d.
+- [ ] **9d** Two cells are dead and no decision rule fixes them (`banking77/intent`,
+      `mnli/relation`): their association numbers do not beat their own permutation nulls. 9d is a
+      scope decision for G1 — in or out — not a fix, and it is the user's call, not a checkbox to
+      tick by shipping something. Recorded so the next run does not silently average them back in.
+      **Priced, so the call is not blind** (`uv run python -m bench.scope_pricing`, witness
+      `runs/scope_pricing.json`, §9.45): dropping the two named cells moves the level 0.4893 →
+      0.5334 and the majority floor 0.4331 → 0.4666 with it, so the margin G1 gates on moves
+      +0.0563 → +0.0668 — eleven-thousandths, not forty-four. Dropping their whole sources is the
+      same 14 cells (each contributes exactly one), and dropping *every* cell that answers below
+      its own floor — 5 of 16, a cherry-pick no release would ship — reaches 0.5526 at +0.0949,
+      still 0.147 short of the target. **No scope choice in the table makes G1 pass**, so 9d is a
+      decision about what the published claim means, not a route to clearing the bar, and it should
+      not be argued for with GPU hours on the expectation that the run would then pass.
+- [x] **9e** The ablation 9a opened for, settled on this box for 0 GPU-hours — and the two
+      reproducibility defects that had to be fixed before it could be settled. `--score-loss` was
+      one flag and one output directory away from a *pair* of runs, which is the only reason 9a
+      was closable without the account: four CPU arms (`ce`/`emd` × seed 0/1, 250 updates) starting
+      from one shared init. Getting there required two fixes, because the arms were not comparable
+      as written. (i) `--seed` named the data order and nothing else — model init came from whatever
+      torch's global RNG held, so two runs of one command differed by init noise. That is why 9a's
+      own loss tests push a single update through a `typed_loss` spy *inside one process*: across
+      processes the init differed for a reason nobody was testing. (ii) The seed was also resizing
+      the step, because `state_token_p95` drew its sample with `random.Random(args.seed)`, so the
+      experiment's seed decided the batch size (measured, on the full pilot: p95 267/batch 15 and
+      p95 274/batch 14 from one command at two seeds). Fixed both ways it should be:
+      `torch.manual_seed(args.seed)` before the model is built, and the p95 taken from the corpus
+      rather than from the run — which moves no published figure, because every run this repo has
+      published used seed 0, where the two are the same draw. `--warm-start` is a third addition and
+      it is not a synonym for `--resume`: resume restores the saved `CosineAnnealingLR` state
+      including `T_max` *and* AdamW's `param_groups` including `lr`, so continuing a finished cosine
+      schedule trains at LR ≈ 0 while printing a perfectly plausible curve. The load-bearing test is
+      in `tests/test_memory_plan.py`: two cold runs of one command must be bit-identical, *and* a
+      warm start must land on different weights, because a warm start that lands on identical
+      weights loaded nothing.
+      **The verdict: 9a's term does not pay at this dose.** `bench/ordinal_ab.py` judges the arms
+      from their own `cmd:` lines — a pair may differ only in `--score-loss`, `--seed`, `--out`, and
+      it asserts the two arms of a pair share batch, p95 and `last_step`, and that neither stopped
+      early — and `runs/ordinal_ab.json` carries the per-cell rollups, the pairs, and the **churn
+      floor**: the mean |delta| across the 13 cells `emd` cannot price, which move anyway because
+      the trunk is shared. A score-cell delta under that floor is not an effect. Per seed, dev:
+      score-cell mean **+0.008333 / +0.004167** against floors of **0.013982 / 0.010086** (ratio
+      **0.596 / 0.4131**). Per seed, test: **+0.020833 / 0.0** against **0.011843 / 0.011925**
+      (**1.7591 / 0.0**). The headline moves *opposite ways in the two seeds* on both splits (dev
+      **−0.011828** vs **+0.003155**, test **+0.007952** vs **−0.001408**), and sign agreement
+      across seeds on the three priced cells is **2/3** on dev, **1/3** on test. One arm clears
+      its floor and its own replicate is exactly zero, so nothing here separates the term from
+      trunk noise. This also corrects how the same data was first read: the
+      ratios quoted then (**0.52 dev / 0.88 test**) pooled both seeds into a single mean, and
+      pooling is what made *every* ratio look below 1 — an average of a positive draw and a zero one
+      is a statement about neither, and §9.36 keeps the lesson. What the dose cannot say, do not
+      borrow it for: it does not price `emd` at 3,600 updates, and the init every arm warm-started
+      from (`v1b-kaggle-3600b`) has its *figures* committed (`runs/v1b_kaggle_3600b.metrics.json`,
+      so its level is quotable — 0.4893 test macro, §2.1) but not its *weights* (`model.pt` is a
+      65 MB artifact `runs/` does not track), so no local arm can be rebuilt from the same starting
+      point. These stay *relative* movements from that point rather than levels (§9.30's rule,
+      applied to ourselves). `ce` stays the
+      default in `kaggle/run.py`'s `DEFAULTS`, which is what keeps every published number standing. Re-judge the four arms with
+      `python bench/ordinal_ab.py --ab-dir /tmp/ab2`.
+
+### P10 — The prior the rows pay for a constant answer *(10a diagnosed from Tier 0, 10b built, audited and mutation-checked 41/41 (§9.48); 10c is the GPU pair, priced and unrun)*
+
+P9 named three defects from accuracies, and an accuracy cannot say *which input* the answer came
+from. Tier 0 (§9.47) ablated the inputs on the committed V1-B checkpoint and eight of decision-v2's
+sixteen cells turned out not to read the state at all — swapping it moves their accuracy by ≤0.001 —
+and three of those eight are agnews `noul` cells that emit one label on *every* test row and finish
+exactly on their own majority floor (0.6531 / 0.8085 / 0.7778). The cheapest mechanistic reason the
+training data offers for a constant answer is the label prior, and unlike 9d's scope call that part
+is measurable **without a model**:
+
+- [x] **10a** The shortcut is the best-scoring policy the rows support. agnews' train marginal is
+      **0.7390–0.7545** inside its four `noul` cells, so a cell that answers one label always is
+      worth ~0.75 — more than anything a constant predictor can be worth against a flat prior, and
+      the same order as the 0.739–0.755 the cells finished on. `--anti-prior` (10b) flattens the
+      marginal the mini-batch is drawn from, which makes the constant answer worth ~0.5. **What
+      this is not:** a claim that the model will then read. It removes a shortcut; it does not add
+      an ability, and if removing the shortcut does not move the macro, the reading is that the
+      association was never the training signal's fault. The floor the report judges cells against
+      is the untouched *test* split's, and this lever does not move it — see 10b's limits.
+- [x] **10b** `--anti-prior on|off` in `myna.train`, default **off**. Each row is weighted by the
+      product, over the questions it answers, of `1 / (share of its gold label inside its
+      (source, question) cell)`, and the weights are rescaled so every source's sum equals its row
+      count — the task mix cannot move, only the answer histogram inside each cell can. Only cells
+      whose natural majority reaches `ANTI_PRIOR_SKEW = 0.55` are treated: six of sixteen.
+      `bench/anti_prior_audit.py` prices all of it on the shipped rows, through the *real* batcher
+      (`myna.train.draw_row_batch`) at the *published* dose — batch 10, 2,048 question cells per
+      forward, 8 sets per update, 3,600 updates, seed 0, both arms in one process:
+
+      ```bash
+      uv run python bench/anti_prior_audit.py --compare --out runs/anti_prior_audit.json
+      ```
+
+      `runs/anti_prior_audit.log` is the witness. The six treated cells flatten as designed —
+      is_business 0.7545 → **0.6184**, is_sports 0.7483 → **0.6278**, is_scitech 0.7467 → **0.6247**,
+      is_world 0.7390 → **0.6172**, boolq/answer 0.6243 → **0.5023**, yelp/recommend 0.6055 →
+      **0.5095** — while the control arm reproduces the natural marginals (largest move +0.0077).
+      The two guards that make the rest of the table mean something: per-source weight sums equal
+      their row counts to **worst relative deviation 0.00e+00**, and the arms' drawn source shares
+      differ by at most **0.13 points**. That last column is the one that belongs to the weights;
+      the gap between a source's *row* share (9.15 pts) and its drawn share in *both* arms —
+      banking77 sits at 3.97 either way, **−5.18** — belongs to `--max-q-cells` skipping rows whose
+      question branch would blow the budget, and is why reading a single arm's mix as an effect
+      would have been a bug. `--compare` draws every rule in `COMBINE` and `prod` is the minimum in
+      all six columns, which is the measured reason it is the shipped rule; mean/max/geo/sum stay in
+      `COMBINE` only so the table stays reproducible. **The trap this tick found:** at a reduced
+      dose (40 updates × 2 sets) `prod` is the minimum in **1 of 6** columns and `mean` reads 0.8947
+      on a cell whose prior is 0.7390 — a ranking claimed from a short run is a claim about the
+      seed, so the ranking test reads the committed witness, not a cheap run.
+      Two limits the artifact states rather than hides. (i) **Nothing here is an accuracy claim**:
+      flattening the train marginal does not flatten the test marginal, and the floors cells are
+      judged against come from the test split. (ii) **Row-level weighting cannot hold a cell fixed
+      when its rows carry several labels.** Of the ten cells the skew threshold does not target,
+      nine flatten anyway — contrastive/decision 0.507 → 0.337, down to its own 1/3 uniform, −0.163
+      — and **one sharpens**: yelp/rating 0.203 → 0.259, +0.055, because a yelp row answers `rating`
+      and `recommend` at once and these weights are computed on the other question. And the reach
+      over Tier 0's eight is three: the other five (amazon/stars, banking77/intent,
+      contrastive/decision, mnli/relation, sst5/sentiment) are already flatter than 0.55 in their own
+      train marginal, so an inverse-prior re-weighting has almost nothing to remove for them. If the
+      shortcut there is a label prior, it is not this split's majority.
+      `bench/mutation_anti_prior.py` holds the harness's printed face: **41 mutants, 41 caught, exit
+      0** (`runs/mutation_anti_prior.log`), and §9.48 is what that pass taught — including that
+      `kaggle/run.py` had never plumbed the flag, so the whole lane below was not executable from
+      the staged bundle. That gap is now mutation-checked too:
+      `bench/mutation_kaggle_bundle.py` went 42 → **48, 48 caught, exit 0**
+      (`runs/mutation_kaggle_bundle.log`), and §9.48's last paragraph records the one that went green
+      until its test was fixed.
+- [x] **10c** The GPU pair: `antiprior_off_s0` / `antiprior_on_s0` in `kaggle/campaign.py`
+      (`--include-dead`; `--list` labels both *open, unspent*). Two arms × 3,600 updates at the
+      measured 5.618 s/update (§2.1's `kaggle-wall-clock` row) is **~11.2 GPU-hours** of the 30
+      h/week free quota — the cheapest mechanism-level question in the repo. Status as of
+      2026-10-01 18:22 NPT: **both arms are done, and the pair's answer is that the shortcut was
+      carrying 0.0554 of the macro.** The `on` arm scored **0.4784612299508689** against the `off`
+      control's **0.5338735348381732** at the same dose on the same box (§9.56(ix)), and Tier 0 over
+      the same weights prints **0** constant emitters where the control prints **4** — so the
+      batching rule did what §10a designed and the accuracy went *down*, which is the sentence §10a
+      predicted: *"It removes a shortcut; it does not add an ability."*
+      The owner's decision moved it off Kaggle: *"run the on arm on the Mac, not Kaggle. Continue it to
+      3,314 updates (dose-matched to the off control), one run at a time, keep the Mac from sleeping
+      for the whole run, then download + Release the weights immediately and eval macro vs the
+      control's 0.5339."* §9.56 records the launch, the two mechanics that make the dose-matching
+      real (the step index, and which scheduler the resumed run carries), and the result.
+      The `off` arm ran on the local M5 through the canonical launcher (§9.50's lane move) and
+      finished at **3,314 of 3,600** updates — ended by its own `--stop-factor 3.0` guard on a
+      596.40 s step that `pmset` attributes to battery 'Maintenance Sleep', not to allocator paging
+      (§9.53(iv)). Its wall price is the measured **6.719 s/update** averaged over 0→3,300
+      (22,173 s of stamped log), 1.20× the T4's slope, and its weights are on the
+      `antiprior_off_s0-weights` Release.
+      **It reports test macro 0.5339** (floor 0.4331, uniform 0.3321) against V1-B's 0.4893 — a
+      **+0.0445** (exactly 0.0445463372; the "+0.0446" this bullet printed until §9.55(vi) was the
+      difference of two *rounded* macros) that belongs to the data path and not to the flag, which is
+      precisely the confound the fresh control was built to expose. The registry row `antiprior-off-macro` binds that figure
+      to one command over committed bytes:
+      ```bash
+      uv run python -m myna.report --suite data/decision-v2-pilot --split test \
+          --metrics runs/antiprior_off_s0.metrics.json \
+          --laya runs/laya_decision_v2_test.json \
+          --out runs/antiprior_off_s0.report.json
+      ```
+      Re-run on 2026-10-01 to a scratch path rather than over the witness, and the diff is the artifact
+      `runs/antiprior_off_s0.report_repro.log`: **372 leaves compared, 2 differ — `cmd` and
+      `metrics_file`, both provenance strings naming the pre-flatten
+      `runs/antiprior_off_s0/metrics.json` — and the whole `g1` block plus all 16 cells compare equal.**
+      A row whose own command rewrites the file it is checked against cannot show that, so this re-run
+      printed elsewhere and left the witness byte-unchanged. G1 is still not met on this arm: 0.70 target, and the
+      "+0.15 over the floor" clause observes **+0.1008**; laya's 0.667 leaves the gap at −0.133.
+      The dev-mid trace flattened rather than climbing: 13 points from 0.3682 to 0.4332, OLS
+      **+0.0231 per 1,000** over all of them, +0.0166 over the last five, +0.0030 over the last three
+      (the earlier +0.0354 and +0.0191 readings were windows of this same live series, §9.44; the
+      completed log supersedes both). Coverage held across the short dose: `paraphrase_draws`
+      **207,411** over the **3,315** updates that actually ran = 62.57 per update, against V1-B's
+      225,547 over 3,600 = 62.65 (§9.58 — this line first divided by 3,314, the last executed index).
+      The pair has since been audited on the commands that *ran*, not on the cells the generator
+      prints: `runs/antiprior_off_s0/run.json` and `runs/antiprior_on_s0/run.json` each carry 20
+      flags and **18 compare equal — the only differences are `--out` and `--anti-prior`**
+      (§9.55(i)). Both are `--device mps`, both `--seed 0`, both on this box, so this is the one
+      comparison in the whole 10c lane with no machine and no dose-direction confound in it.
+      **And the stopped `on` arm is not zero evidence.** It stamped 540 updates before the lane was
+      shut down by hand (TASK 3, exact PID), and its last save is the step-500 snapshot, so the
+      dose-matched read of the flag is two points: dev-mid at 250 is off **0.3682** / on **0.3592**
+      (−0.0090) and at 500 off **0.3962** / on **0.3789** (−0.0173). Both are *smaller than the `off`
+      arm's own swing between adjacent evals* (0.3962 → 0.3638 = −0.0324 between its 500 and 750
+      readings), so the honest sentence is **the flag is not resolvable at 540 updates** — the signs
+      agree with the pre-registered downside scenario and the magnitude does not exceed the noise
+      floor (§9.55(ii)). What the same 540 steps *do* settle is the wall price: after its first
+      interval, which costs **89.55 s/update** and is data warm-up (the `off` arm's identical first
+      interval costs 6.75), the `on` arm runs **6.63–7.65 s/update** against the `off` arm's
+      **6.43–7.27** over the same intervals. `--anti-prior` buys no wall, so the ~11.2 GPU-hour
+      estimate at the top of this bullet needs no correction for the flag.
+      **The completed `on` arm, and the two commands that carry 10c's verdict.** It reached the dose it
+      asked for: `"last_step": 3314` of `"steps_requested": 3315` with `"stopped": null`, the trainer
+      exiting at 18:19:55 NPT. The continuation's 2,814 updates cost **19,405 s of stamped log = 6.896
+      s/update**, inside the `off` arm's own 6.43–7.27 band, so the wall finding from the stopped arm
+      stands at full dose too.
+      ```bash
+      uv run python -m myna.report --suite data/decision-v2-pilot --split test \
+          --metrics runs/antiprior_on_s0c.metrics.json \
+          --laya runs/laya_decision_v2_test.json \
+          --out runs/antiprior_on_s0c.report.json
+      ```
+      prints **0.4784612299508689**, `margin_observed` **0.04539643455674913** over the same 0.4331
+      floor, and a laya gap that widens to **−0.18835424623960728**. Against the control's
+      0.5338735348381732 the flag is worth **−0.0554123048873043** — registry row
+      `antiprior-on-macro`. The mechanism half, registry row `tier0-on-arm`:
+      ```bash
+      uv run python bench/diag_question_ablation.py --run-dir runs/antiprior_on_s0c \
+          --metrics runs/antiprior_on_s0c.metrics.json \
+          --out runs/tier0_antiprior_on_s0c.json
+      ```
+      prints **0** constant emitters where `tier0-off-control` prints **4** and V1-B's `tier0-ablation`
+      prints 3 (`grep -c '"collapse_share": 1.0'` over the three witnesses; the highest share in this
+      run's 16 cells is `agnews/is_scitech` at **0.9183673469387755**), and state-swap movers go
+      **8 → 10 → 15** of 16. Its as-scored arm rewrites 0 keys, reproduces **716** committed ones with
+      **0** tie flips, and — because the run finished rather than stopped — prints no VOID line, so
+      this is the pair's first untruncated Tier 0 record.
+      The two halves are not in tension; they are the same fact. The audit block inside the run's own
+      `metrics.json` shows the batching rule fired on every treated cell, cutting the majority label's
+      share in the training stream by 0.099–0.137 (is_business 0.7545 → 0.6176, is_scitech 0.7467 →
+      0.6310, is_sports 0.7483 → 0.6322, is_world 0.7390 → 0.6254, boolq 0.6243 → 0.5017,
+      yelp/recommend 0.6055 → 0.5063 across 176,003 drawn rows at `skew 0.55`). So the shortcut was
+      removed, the model stopped emitting it, and the accuracy came down with it:
+
+      | treated cell | `off` | `on` | Δ | `on` collapse |
+      |---|---|---|---|---|
+      | agnews/is_business | 0.6977 | 0.6512 | −0.0465 | 0.674 |
+      | agnews/is_scitech | 0.6531 | 0.5714 | −0.0816 | 0.918 |
+      | agnews/is_sports | 0.8085 | 0.7660 | −0.0426 | 0.872 |
+      | agnews/is_world | 0.7778 | 0.7333 | −0.0444 | 0.911 |
+      | boolq/answer | 0.5750 | 0.5125 | −0.0625 | 0.575 |
+      | yelp/recommend | 0.8375 | 0.7375 | −0.1000 | 0.500 |
+
+      All six treated cells lose, and they average **−0.0629** — which is why the macro is where it
+      is. Outside the treated set the flag costs more still where a prior had been load-bearing:
+      `dbpedia14/category` −0.3621 and `agnews/topic` −0.2069 (topic lands on **exactly its own 0.328
+      floor**, i.e. it becomes the constant emitter the four stopped being), `trec/answer_type`
+      −0.1207, `sst5/sentiment` −0.0750. Four cells improve, and none of them is treated:
+      `amazon/stars` +0.1000, `contrastive/decision` +0.0867, `mnli/relation` +0.0603,
+      `banking77/intent` +0.0086. `imdb/positive` (0.7500) and `yelp/rating` (0.4250) do not move.
+      **One residue this *appeared* to add to the pair, and §9.58 withdraws it.** The `on` arm reached
+      **176,003** phrasing draws against the control's **207,411**, and divided by denominators taken
+      from each run's *report* rather than its dose — `steps_requested` for one, `last_step` for the
+      other — that reads as 15% less paraphrase coverage, which would have made this a
+      two-variable comparison rather than a two-flag one. It is not: the `on` process resumed at step
+      501 and executed **2,814** updates, so its rate is **62.55** draws per executed update against
+      the control's **62.57** over its own 3,315, at identical `paraphrase_sets` 17,112, identical
+      seed, identical flags bar `--anti-prior` and `--out`. `bench/coverage_replay.py` replays both
+      drawers on this corpus with no model and no device and lands on **both counters exactly**
+      (207,411 and 176,003; 21.7 s wall), because `Paraphraser.draw` counts accepted rows and the
+      weighted drawer accepts the same number per batch as the uniform one. So this *is* a pure
+      two-flag pair and the judgement is undiluted: **at the dose this box can afford, removing the
+      shortcut costs 0.0554 of the macro, the mechanism moved exactly as designed, and none of that
+      −0.0554 is coverage** — the answer to "was the constant answer the training signal's fault" is
+      that it was a signal, and there is no reading underneath it that the run recovered.
+      The `on` arm had moved back to Kaggle because the Mac's thermal budget was thought spent; that
+      lane is now closed by the owner's decision above and the measurements below stand as the record
+      of why it cannot be run there at all. The kernel is
+      built (`kaggle/notebooks/antiprior-on-t4`, every arm through `kaggle/run.py`, `--dry-run`
+      printed in-cell) and pinned to the SHA that carries the `ask()` fix, but the new account
+      `anonymous124` is handed a CPU session even though the server's own record of the pushed kernel
+      reads `enable_gpu: true` and `machine_shape: "NvidiaTeslaT4"` — five request variants across two
+      notebooks all come back `torch 2.10.0+cpu`, `device_count 0`, `ACCELERATOR_TYPE None`, while
+      `kaggle quota` prints 30.00 h of GPU sitting unused and the identical recipe trained all 3,600
+      updates on `anonymouskumaranonymous01`'s T4 (§9.53(vi), which also retracts the phone-verification
+      guess first written there). Cell 1 refuses to train on CPU rather than print identical-looking
+      numbers, and
+      that refusal has been fired once on purpose. `--free-gib 9.0` was *not* adapted: V1-B's own
+      recovered `metrics.json` records `mem_plan_free_gib = 9.0` from the T4 run, so the pin is
+      shared by both boxes and changing it would silently re-clamp the batch (§9.53(v)).
+      The guard that this bullet has always promised — "judge it on the emitter count, not the
+      macro" — now has its baseline measured on the box the pair actually ran on. Tier 0 over the
+      `off` control's own weights:
+
+      ```bash
+      uv run python bench/diag_question_ablation.py --run-dir runs/antiprior_off_s0 \
+          --metrics runs/antiprior_off_s0.metrics.json \
+          --out runs/tier0_antiprior_off_s0.json
+      ```
+
+      The harness prints its blocker before its numbers — `VOID: this run STOPPED at step 3314 of
+      3600 requested … No claim may be read from them` — so what follows describes truncated bytes,
+      and it is still the most informative comparison in the repository, because the as-scored arm
+      reproduces **all 716 keys** of the committed report (0 tie flips), which binds all six arms to
+      the published 0.5339. Against `tier0-ablation` on V1-B, **the +0.0445 arrives with less prompt
+      selectivity, not more**: blank-instruction rises 0.3341 → **0.4315** (+0.0974) and blank-options
+      0.2669 → **0.3674** (+0.1005), both by *more* than as-scored's +0.0445, so the instruction-reliance
+      gap closes **0.1553 → 0.1024** and the options gap **0.2225 → 0.1665**. The state axis is the
+      exception and the one unambiguously good line: swapping a row's state now costs
+      0.0720 → **0.1263**, and the cells that move at all go **8 → 10** (`contrastive/decision`,
+      `mnli/relation`, `sst5/sentiment` join them). The count that 10c's verdict turns on — `grep -c
+      '"collapse_share": 1.0'`, which is 3 in V1-B's witness — is **4** here: `agnews/is_business`
+      became a constant emitter, answering label 0 on 43/43 rows and landing exactly on its own 0.698
+      floor, which is how its accuracy rose 0.6512 → 0.6977 (§9.55(iii), row `tier0-off-control`).
+      The confound this bullet used to carry — `off` on the M5 at 3,314 against `on` on a T4 at 3,600,
+      so the pair priced the flag *and* the machine *and* the dose — is gone, and the reason is the
+      owner's decision above: both arms are now this box at this step index. What replaces it is
+      narrower and has to be named: the `on` arm is a **continuation**, not an uninterrupted run. It
+      resumes the step-500 snapshot with `--resume`, which re-seeds the data RNG from `--seed 0` at
+      step 501, so the batch sequence after 500 is a fresh draw rather than the one an
+      uninterrupted 3,600-request `on` arm would have made, and its `--steps` request reads 3,315
+      because that is the value whose last executed index is the control's 3,314 (§9.56(ii)). The
+      learning-rate curve is *not* a third variable — the resumed scheduler carries the saved
+      `T_max = 3600`, which is what the control annealed against. Two guards on the read: the verdict
+      stays on Tier 0's **emitter count over the 16 cells**, measured against the **4** the `off`
+      control prints on this same box at this same step, and any macro quoted from this pair is
+      quoted *with* the resume sentence attached, never as the flag alone.
+      The clause the first of those guards leaned on — that the emitter count is "a property of the
+      batching rule, not of the box" — is **measured and wrong**: `off` (M5, 3,314) and V1-B (T4, 3,600)
+      share `--anti-prior off` and
+      differ only in box and dose, and their emitter counts are 3 and 4. The emitter count is
+      therefore *not* box- or dose-invariant, and it can only be read as a verdict against a baseline
+      from the same box at the same dose (§9.55(iv)). With the baseline measured, that rule is now
+      falsifiable in one number: **an `on` arm that comes back with 4 or more constant emitters has
+      bought the mechanism nothing**, and one that comes back with 3 or fewer has moved it in the
+      direction the anti-prior rule was written to move it.
+      The control is *run*, not borrowed, because 0.4893 came off
+      the `myna-code` dataset version as it stood before any of the data-loader work landed on this
+      branch: judged against that number a difference would price the flag *and* the code drift,
+      judged against a fresh `off` arm it prices the flag. Both arms keep `--score-loss ce`, `--seed
+      0`, `--stop-factor 3.0`, `--save-every 250` and the same `--free-gib` pin; `tests/test_kaggle_bundle.py`
+      asserts the two generated cells are byte-identical after normalizing the one flag value, so a
+      third variable cannot enter the pair later. That last clause is about the two generated Kaggle
+      cells, and the local lane did get two more differences when its `on` arm was continued rather
+      than restarted — `--steps` and `--resume` — which §9.56 names instead of letting this sentence
+      stand as a guarantee it never covered. `off` stays the default at every layer
+      (`DEFAULTS["anti_prior"]`, every existing cell, `train.py`'s own default), which is what keeps
+      every published number standing.
+
+### P11 — Installable and usable as-is *(the brief of 2026-10-01 evening: a reader who has the repo
+should be able to ask the model a question in five lines, without `gh` and without this SPEC)*
+
+Everything below is measured on this box, on the best published arm
+(`antiprior_off_s0-weights`, test macro 0.5339, registry row `antiprior-off-macro`), with no training
+run started and no paid resource touched.
+
+- [x] **11a — inference verified from a clean state.** `gh release download antiprior_off_s0-weights
+      -D /tmp/ckpt-05339`, then `Myna(dir).predict(state, {"department": choice-of-five})` prints
+      **`billing`** at `confidence` **0.7899749875068665**, `shipping` the weakest at
+      **0.00027509400388225913**, 16,926,848 params at temperature 1.5, `latency_ms` **7.84**. The
+      downloaded `model.pt` hashes to the digest the Release API publishes for that asset
+      (`30f0fa937e57e8ce8b21c58315dc7e800151a0c95e003dc0930e0f75d588f1e5`). Witness:
+      `runs/quickstart_from_gh_download.log`, which prints its own commands (§7.1).
+- [x] **11b — `myna.fetch_weights()` and `myna-weights`.** `src/myna/weights.py`: stdlib `urllib`
+      only — no `gh`, no token, no new dependency. It resolves the release's assets through
+      `api.github.com/repos/<repo>/releases/tags/<tag>`, reads the `digest` GitHub publishes per
+      asset, downloads over the public asset URL, and **refuses bytes that do not hash to it** by
+      deleting them rather than leaving a truncated `model.pt` that `myna.report` would happily score.
+      It writes `SHA256SUMS` in the shape `shasum -a 256 -c` reads (run: 2/2 `OK`), and a cache that
+      satisfies its own manifest returns **without touching the network** — proved by calling it with
+      `repo="no-such-owner/no-such-repo"` and getting the directory back. Cache is
+      `$XDG_CACHE_HOME/myna/<tag>` (default `~/.cache/myna/antiprior_off_s0-weights`); `--check`
+      reports and never writes; `--force` re-pulls. Weights are **not** in the wheel: `python3 -m build`
+      on this tree gives **27 files / 121,666 B** (332,809 B uncompressed), `find … -name "*.pt"` inside
+      it returns **0**, and a test asserts the cache root
+      is never under the package directory, so that cannot rot quietly.
+      *(§9.60: this line read **25 files / 95,644 B** (264,410 B) until the PyPI claim renamed the
+      distribution and added `dist-info/licenses/LICENSE` plus a README-sized `METADATA`.)*
+- [x] **11c — a fresh venv installs from git and the quickstart runs inside it.**
+      `uv venv --seed --python 3.12` (3.12.13, pip 26.2.1) then `pip install "git+file:///tmp/miga"`,
+      where `/tmp/miga` is a scratch git clone of this working tree at `21e9224` (the `git+https`
+      vector is pip-identical and is separately confirmed in 11d). `Successfully installed …
+      myna-0.1.0 … torch-2.14.1`; `myna.fetch_weights` imports; `myna-weights --dest /tmp/venv-fetch`
+      pulls the real 65 MB from GitHub and verifies it with no `gh` on the box; and the five-line
+      snippet prints **`billing`** / **0.7899749875068665** / `latency_ms` **6.98** from inside the
+      installed package. `pyproject.toml` needed no fix for any of that — what needed fixing is
+      §9.57. Witness: `runs/quickstart_from_git_install.log`.
+- [x] **11d — the documented URL itself.** `pip install "git+https://github.com/anonymous/myna"`
+      into a third fresh venv installs the *pushed* tip `c29494e`, loads the same weights and answers
+      the same question with the same probability, and reports `fetch_weights` **absent** — the
+      correct reading of an unpushed change, printed rather than glossed. It becomes true the moment
+      this is pushed. **It is pushed now**, and the same line re-run from a fresh venv resolves to
+      `fe11db6`, imports `myna.fetch_weights` out of `site-packages`, and has the console script pull
+      the Release into a new directory and answer **`billing`** / **0.7899749875068665** /
+      `latency_ms` **7.93** from it, with `shasum -a 256 -c SHA256SUMS` printing 2/2 `OK` and `cmp`
+      matching both files against the cache. Witness: `runs/quickstart_from_public_install.log`; the
+      resolution of this clause's conditional is §9.59.
+- [x] **11e — README quickstart above the gate table.** Install line, fetch line, the verified
+      five-line snippet, its printed answer with the digest it came from, the `--tag` list naming every
+      published arm, and the `gh release download` equivalent. The gate table follows immediately, its
+      **"3 of 7 met, 3 not met, 1 open — the release gate is NOT clear"** headline unchanged, with one
+      bridging sentence saying the plain thing: the engine works like this, what it is *worth* is the
+      table below, and the answer to the second question is not good.
+- [x] **11f — HTTP documented and booted.** `myna-serve --ckpt ~/.cache/myna/antiprior_off_s0-weights
+      --port 8080` answers `GET /v1/health` with `{"ok":true,"params":16926848,"temperature":1.5,
+      "abstain_below":null}` and `POST /v1/predict` with `{state, questions}` returns the identical
+      `answers` object — same `billing`, same `0.7899749875068665` as the in-process engine. Started by
+      exact PID, stopped by exact PID, port verified closed afterwards.
+- [x] **11g — tests.** `tests/test_weights.py`: **19** over a faked GitHub (no network in CI, no
+      credentials, no 65 MB to prove a hash) — both assets land and hash to the published digest; the
+      manifest is `sha256sum -c` shaped; a complete cache is reused with `api_calls == 0`; a flipped
+      byte is caught and *only* the damaged asset is re-pulled; a hand-made cache is verified before
+      being adopted; a lying digest raises and leaves neither file nor manifest; an empty body leaves no
+      zero-byte file and no `.part`; a connection that dies mid-body leaves no `.part` and no manifest;
+      a short 200 — which is not an error to urllib — is refused by its digest; an unknown tag names the
+      tag and the command to type; a release missing `tokenizer.json` says which one; `--check` never
+      writes; the CLI prints a sentence, not a traceback; `weights.py` imports stdlib only; and the seam
+      test hands the fetched directory straight to `Myna(...)` and gets a typed answer.
+      `tests/test_serve.py` grows **2** for the messages 11f required; `tests/test_cli_help.py` grows
+      **2** parametrised cases so `--help` on the new module is gated like every other published
+      command. `bench/mutation_weights.py`: **16 mutations over `weights.py` and `serve.py`, 16/16
+      caught, exit 0, 190.46 s**, in `runs/mutation_weights.log` — the digest comparison made
+      unconditional, GitHub's `digest` field never read, refused bytes left on disk, `cached()` satisfied
+      by existence, a manifest-less directory counted as cached, no manifest written, the gap becoming
+      one space, a missing asset fetched anyway, `DEFAULT_TAG` repointed, an empty body kept, a mid-body
+      death leaving its `.part`, `--check` writing, a `requests` import, the cache rooted inside the
+      package, and both serve guards removed. The first five of those were injected ad hoc before the
+      battery existed; §9.57 records why "deliberately not written" was the wrong call.
+- [ ] **11h — the two things that need an account, so they are the user's, not the agent's.**
+      **PyPI**: publishing now means `pip install myna-engine`, not `pip install myna` — §9.60 records
+      that `myna` returns **200** on `pypi.org/pypi/myna/json` for a project with **0 files** in both of
+      its releases, which is simultaneously blocked and unusable, and a name transfer can only be
+      issued by the current owner's verified email. `pyproject.toml` already carries the claimed name,
+      so what is left is his PyPI credentials and nothing else; it makes the *name* load-bearing, so it
+      is his call — the git line works without it (11c). **Hugging Face Space**: a hosted demo needs
+      his HF token; `myna-serve` already speaks `POST /v1/predict`, so a Space is a thin wrapper over
+      11f and nothing here blocks it.
+      Both are *unattempted on purpose*, not unfinished.
+
+What P11 does **not** change is the accuracy story: the best arm is still 0.5339 against G1's 0.70, and
+§9.56(xii) already prices how far that is. A working install path makes the number reachable by a
+stranger, which is the whole ask. The registry stays at 34 rows and no figure in this section becomes a
+row, because a usage example is not a measurement *of the model* — its witness is a log that prints its
+own commands, named above — while `macro 0.5339` was already bound by `antiprior-off-macro`.
+
+---
+
+## 6. Compute and budget
+
+- **Measured:** 0.26M tokens before the pilot (3,432 rows × mean 300 chars ÷ 4) ⇒ **0.017
+  tokens/param**. The P1 pilot corpus is **4,246,106 state tokens over 57,904 states** — tokenized
+  with the suite's own Qwen2.5-0.5B tokenizer, not the ÷4 estimate — ⇒ **0.28 tokens/param**, whose
+  divisor is now stated (it was not when this line was written): 4,246,106 ÷ **15,353,984** = **0.2765**,
+  the default `MynaConfig` count and the only one of §9.64 (i)'s three counts that reproduces 0.28 —
+  against 14,449,280 the same numerator is 0.2939 and against 16,926,848 it is 0.2509 (§9.64 v).
+  The "≈20 tokens/parameter" compute-optimal constant this line used to quote is **withdrawn**: neither
+  scaling-law paper states a tokens-per-parameter constant (Hoffmann et al., arXiv:2203.15556, gives equal
+  scaling — `a = 0.50` and `b = 0.50` at §3.1 — and Kaplan et al., arXiv:2001.08361, fits `D ∝ N^0.74`,
+  which is not a constant ratio), so the ~307M-token target that constant produced goes with it and no
+  external per-parameter law is claimed here. The ratio above is this project's own pilot measure.
+  Supervised fine-tuning is more sample-efficient — but the
+  capability we lack, following instructions never seen in training, is exactly the one that
+  scales with tokens-per-parameter. That is the honest boundary.
+- **Therefore: parameters are not the lever.** The "32M would still be 1,189× / 93M 3,655×" data-debt
+  multipliers this bullet carried were measured against the ≈20 tokens/parameter yardstick withdrawn
+  immediately above, so they are **deleted, not recomputed** — no replacement target is quoted here, because
+  none is witnessed in this repository. What the pilot ratio does support is directional and uses only the
+  three counts §9.64 (v) already prints: the same 4,246,106 tokens are **0.2765** tok/param at the default
+  15,353,984, **0.2509** at the 16,926,848 arm G1 was scored on, and **0.2939** at the shipped 14,449,280.
+  Adding parameters to this corpus lowers the dose each parameter receives; that is the whole of the claim.
+  Scaling params without data worsens that ratio. Growth is affordable on latency and gets tested in P3 —
+  after the data.
+- **M5 (32 GB, unified):** `--batch 32 --vocab 8192` thrashes swap; a pool+accum run projected
+  2.81 s/update but **measured 4.93 s/update** before raising Metal
+  `kIOGPUCommandBufferCallbackErrorOutOfMemory` and rebooting the machine. Budget by the *token*
+  axes P2 measured (1.6 MiB per question-token position, 0.8 MiB per state-token position), not by
+  option count — §9.9. Never run P4/P6/P7 concurrently with P3.
+- **Training runs on Kaggle, not the M5** (user directive, 2026-09-26): the M5 does architecture
+  code, data, tests, inference/eval and every Apple-only measurement (MLX, MPS latency, browser
+  on-device) — those cannot move. **The directive itself was lifted by the account holder on
+  2026-10-01**, in writing ("run the training locally … I gave you all permission"): with the T4
+  unreachable (§5 P0's auth line), keeping it would have stopped every dose experiment, so the 10c
+  pair runs on this box. What the lift does not change is the box's memory ceiling — this arm
+  requests `--batch 10` and pins `--free-gib 9.0` precisely so the plan picks the same batch V1-B
+  trained at instead of sizing to whatever bytes are free at the moment the plan runs. The blockers
+  this loop could clear are cleared: (1) the remote now exists (§5 P0, 2026-09-30), though that
+  changes nothing about how the bundle travels: a Kaggle kernel has no internet unless it is
+  granted, so the code still ships as the kernel's uploaded source and the data as a dataset
+  (`kaggle/package_dataset.py` builds it, prints the upload command, does not run it); (2)
+  `requires-python` is `>=3.11` and the package is proven to train on a real 3.11
+  (`bench/check_python311.py`); (3) `--device auto` picks CUDA (`59240e1`); (4) the pilot dir ships
+  as a dataset, so no suite path with a trailing space reaches the box — `kaggle/run.py` takes
+  `--corpus` or globs `/kaggle/input` and refuses a corpus missing a split.
+  What remains is not code: the GPU run itself, and whoever holds the credentials (`KAGGLE`).
+- **Sizing on the box** is `safety × free − question-branch reserve`, ÷ `p95 state tokens × 0.8 MiB`
+  (§5 P3 3d, §9.14) — with `--free-gib` as the escape hatch when the platform reports nothing usable.
+
+
+---
+
+## 7. Working discipline
+
+1. **A passing count is not proof.** Corroborate from the system under test, and mutation-check
+   every gate — a test that cannot fail is not a gate.
+2. **A tool's own exit code is the weakest witness.** Verify on-disk and on-process state before
+   reporting that anything landed.
+3. **Label every number** measured / projected / gated. Never fabricate a competitor multiplier;
+   never publish an internal ablation ratio as a competitor comparison.
+4. **Stratify, then aggregate.** The aggregate is where claims get made, so it is the last thing
+   to trust.
+5. **Own corrections in writing**, in this file, with the artifact that proves them (§9 is the
+   record; it must never be emptied).
+6. **Process safety during training:** never broad-`pkill`; kill stray jobs by exact PID.
+7. **Push stays user-gated.** Local commits are fine.
+
+---
+
+## 8. Risks
+
+| risk | severity | mitigation |
+|---|---|---|
+| The 16,926,848-parameter arm at vocab 8192 (`runs/v1b-kaggle-3600b` — the config G1 was actually scored on; the 15,353,984 default `MynaConfig` never was, §9.64 i) cannot learn instruction-following well enough to clear G1 | **high** | both prerequisites are now built — P1 data (4.25M tokens) and P2's per-row contract — so this risk is finally testable rather than arguable; if G1 still fails, the honest product is abstention (G5), not accuracy |
+| Latency advantage evaporates under equal-footing measurement (P4) | **high** | the size, window, calibration and browser-memory claims stand independently; the pitch must survive without the ratio |
+| Upstream-data comparison reads as unfair | medium | **disclosed, P8 8c**: README prints myna-scratch (0.348 mean over two seeds), myna-trained (**gated on its witness being committed here** — the run has happened, and 3i publishes its number from its own artifact), and laya (0.667) as three rows over the same 16 cells, with the 0.433/0.332 floors and the void-checkpoint disclosure (0.338, below its own control) beside them |
+| Another machine crash mid-run | medium | cloud training, checkpoint every ≤ 50 updates, observed-rate stop rule |
+| ONNX export can't express the recurrent scan efficiently | medium | prototype the export before committing to G3; fallback is wasm-only fp16 with a measured caveat |
+| Parameter growth quietly voids the speed claims | low | re-run the latency ladder after any size change, in the same commit |
+
+---
+
+## 9. Corrections log — things we previously stated wrong
+
+Kept permanently, because the value of this project's claims is that they survive scrutiny.
+
+1. **"239× faster than laya."** Wrong: 239× is myna-stream vs *myna's own* re-encode path — an
+   internal ablation. Real measured comparison vs laya: ~15× at 1k tokens on the same box, rising
+   with context length. Fixed in the memory file; must never reappear in the README.
+   **This entry's own remedy was wrong too** — no artifact ever produced "~15× at 1k tokens", and the
+   number that would have, laya's ~500 ms plateau, is its truncation window (§9.20). The lesson is
+   not "the ratio was inflated"; it is that a correction which replaces one unmeasured competitor
+   number with another, while the README that carried the first stays published, is not a correction.
+2. **"laya's context ceiling is 8192, so we have 2× it."** Wrong. The laya *checkpoint* windows are
+   512 (english) / 1024 (typed-decisions); 8192 was a Router-level input guard. Our long-context
+   claim is therefore **categorical, not a ratio**: beyond ~1024 tokens laya is deciding from a
+   prefix, not from the document.
+3. **"1,146 question-sets, median pool 1, therefore catastrophic interference."** Wrong, and it
+   was my own adapter. `_signature` hashed `criteria` **descriptions**, which the suite randomizes
+   per row (55 of 77 banking77 descriptions differ between two rows of the same task), shattering
+   300 same-schema rows into 300 singleton sets. Grouped instead on **exact instruction text +
+   option key set**: **642 sets**, of which 602 are singletons — and 600 of those singletons are
+   `boolq` (300) and `mnli` (300), which are genuinely one-set-per-row because their instruction
+   text *is* the per-row question/hypothesis. The other nine sources collapse to **40 sets**, with
+   amazon/dbpedia14/imdb/trec each a **single** set of 300, and banking77 (249) / sst5 (248) /
+   yelp (258) / contrastive (120) / agnews (48) holding 2–22 sets each. So: 8 of 11 sources have
+   250–300 genuinely distinct examples under a stable schema, and only boolq + mnli need the P2
+   per-row contract fix. (An earlier pass of this analysis quoted "~282 sets"; that came from
+   masking quoted spans in the instruction text, which over-collapsed boolq/mnli/agnews. 642 is the
+   defensible number and the masking approach is abandoned.)
+4. **The batching bug that the above hid.** `rng.choices(pool, k=batch)` samples **with
+   replacement**, so a singleton pool produced a batch of N identical rows — loss → ~0, gradient
+   ≈ one example. This affected most updates in every V1-B run. Fixed in `385e06c`. Consequence:
+   **every accuracy figure in `runs/*.log`, including myna-test 0.2821 and the "below the majority
+   floor" line, is void as evidence about myna's ceiling.** They measure my bug.
+5. **"myna structurally cannot beat laya on accuracy."** Retracted — it was conclusions 3 and 4.
+   The lane is open: laya's own margin over a constant predictor is +0.013 (imdb) and +0.038
+   (boolq).
+6. **Two mechanisms built for a misdiagnosis.** `--accum-groups` and `--group-sample` were added to
+   treat interference. Accumulation did help — partly because it replaced duplicated rows with
+   distinct examples. Kept, but the stated reason is corrected.
+7. **"The step-600 checkpoint landed."** Said from a background task's exit-0 notification while no
+   file existed. Retracted.
+8. **"dev-mid 0.692."** Misread a loss line as an accuracy line; actual 0.3413.
+9. **"The pointer head materializes `[B,N,O,Lq]`, so cost scales with options × batch — that is the
+   tensor that OOM'd the M5."** Wrong, and P2 measured it: option pooling is a batched matmul whose
+   output is `[B,N,O,d]`, and the whole 8×3×77 option grid costs 2.7 MiB. The step's memory goes to
+   the *chunked scans'* `[rows, heads, chunk, chunk, d_k]` terms — 1.6 MiB per question-token
+   position, 0.8 MiB per state-token position, 3 KiB per option cell. So the sampler budgets
+   question cells (which is what `--max-q-cells` does), and the M5's crash is explained by the state
+   axis at `--batch 32`, not by banking77's 77 options. The correction changes the mitigation, not
+   the conclusion: budget by *something*, and 32 GB is not a licence for a 32-row long-state batch.
+10. **"The suite froze 500 rows per source."** Wrong as written: 500–872 is the per-source total
+    across *all four* splits. The train split is 300 rows/source (contrastive 432), dev and test are
+    1,176 rows each (80–116/source), calibration 448. The suite ships **6,232 rows**; the pilot's
+    57,904 train states are 54,472 upstream + 3,432 of those.
+11. **"v0's dev ECE ≤ 0.042."** The scalar behind every v0 dev metric was fit **on dev**, so the
+    dev accuracy/calibration numbers were scored on the rows that picked the temperature — in-sample.
+    Test metrics are unaffected (test never entered the fit). Fixed for future runs by fitting on the
+    suite's `calibration.jsonl`; the v0 figures stand as measured but read dev as optimistic, and
+    the RLCD "ECE halved" delta was measured the same in-sample way on both sides, so its *direction*
+    is safe and its *level* is not quotable.
+12. **"29 mutations, all caught" — said of a battery that mutated nothing.** `bench/mutation_paraphrase.py`'s
+    first pass put a patched `src/` on `PYTHONPATH` and reported **0/29 caught**. The tests were not
+    weak: `pyproject.toml`'s `pytest pythonpath = ["src"]` is resolved against the rootdir and
+    *outranks* `PYTHONPATH`, so every run imported the unmutated tree. A gate whose harness is dead
+    reads exactly like a gate that is merely permissive, and the wrong conclusion from 0/29 would
+    have been "add more tests". The battery now runs pytest inside a copy of the repo, requires the
+    unmutated baseline to be green, and aborts if the *first* mutation survives. Fixed harness:
+    **29/29**. Two of the three initial survivors were real holes once the mutations actually landed
+    (boolq rows whose question *ends* with a suite suffix had that tail edited; boolq/mnli frames
+    whose nine variants all ended the same way), and one was an **equivalent mutant** — every
+    `SUITE_SUFFIXES` entry starts with a space, so deleting `.rstrip()` changes no output on this
+    data. Kept the call, logged why, and dropped the mutation.
+13. **`python -m myna.train --help` crashed.** Present since before P0, found only because the
+    paraphrase battery needed a CLI sweep: argparse formats every `help=` string through `%`, and
+    `--group-sample`'s measured "~1.4% of updates" is not a legal conversion — `TypeError: %o
+    format`. Written `%%`, so the number still prints. Same sweep found `myna.serve` importing
+    `uvicorn` *before* `parse_args()`, which made the optional `serve` extra a requirement for
+    reading the usage text. Both now pinned by `tests/test_cli_help.py`, since "one command per
+    result" (G7) is worth nothing if the command cannot be asked what it does.
+14. **"Size the batch as `free_bytes / (0.8 MiB × state tokens)`."** Right price, wrong denominator:
+    that is the *state scan* alone, while a `--row-batch` step holds the question branch at the same
+    time — 1.6 MiB per question-token cell, from the same `bench/mem_profile.py` measurement, and
+    `--max-q-cells` is what bounds it. §9.9 already said the M5 died with both axes live, and the
+    P3 sizing bullet still priced one, so the plan would have cheerfully picked a batch that fits
+    the scan and then OOM'd in the probe. Fixed: the reserve is subtracted before rows are counted,
+    a budget the reserve alone eats is a **refusal that names `--max-q-cells`** rather than a silent
+    batch of 1, and the printed plan line says how much of the headroom went to the question branch.
+    The rule this breaks is the general one: a per-axis price list is not a budget until the axes
+    that are simultaneously live are summed.
+16. **"Macro uniform-chance 0.3292."** The 3g harness reproduced §4.2's majority floor *exactly*
+    (0.4331) and its uniform floor as **0.3321**. Not a rounding story: a (source, question) cell is
+    asked by several question-sets whose option counts **differ**, because kev randomizes distractors
+    row to row — agnews/topic appears with 4 options for 104 test rows and 5 for 12, banking77/intent
+    with 77 and 78, contrastive/decision with 2, 3 and 4. So `1/options` has no single value per cell,
+    and the old figure was one of the available weightings picked implicitly by an ad-hoc pass that
+    left no script behind. Three alternatives were measured against it on the same split before
+    settling (mean over sets 0.3267, minimum per cell 0.3139, first set read 0.3397 — an ad-hoc probe,
+    published here only to show the spread, not as a result): the harness takes the **row-weighted**
+    0.3321, prints the six mixed cells with their full
+    option histograms so a reader can audit it, and a test pins 0.433/0.332 together. G1 is judged
+    against the majority floor, which is unchanged; the correction matters because a +0.15 margin is
+    quoted, and a margin against a floor that cannot be recomputed is a claim, not a measurement.
+17. **"9 groupable vs 2 per-row" is a fact about instruction strings, not about question-sets.** The
+    first pass of `report.strata()` keyed on the adapter's group signature and classified **11 of 11**
+    sources as per-row-instruction — it reported the artifact and concluded the suite had no
+    structure. The signature *must* include the per-option `criteria` descriptions (kev varies them
+    row to row, they are part of the option text, and two rows with different criteria genuinely
+    cannot share a question tensor — that is why P2 batches on it), so on the test split agnews's 116
+    rows sit in **113** exact-signature sets while sharing only **8** instruction strings, and 0.05 of
+    its rows live in a reused set; boolq's 80 rows are 80 sets *and* 80 distinct instructions, which
+    is the actual per-row case. Measured on the same rows, the two counts diverge for nine sources
+    and coincide for two. Recorded because the same key produced §9.3's "1,146 question-sets, median
+    pool 1, therefore interference" story, and because P1's topology line (17,112 pilot question-sets,
+    96% singletons, against 10,668 schemas) is the same measurement on the train split — true as a
+    *batching* fact, misleading as a taxonomy. The durable rule: a structure claim about a derived
+    corpus is checked against the generator's randomization, and a batch key is not a taxonomy.
+18. **A mutation battery is a measurement, so nothing may move while it runs.** The first two passes of
+    `bench/mutation_report.py` ran while `src/myna/report.py` and `tests/test_report.py` were still
+    being strengthened, and because the harness re-copies `src`+`tests` for every mutation, one log
+    blended code states: eight survivors and a `BAD-PATTERN` whose pattern matches exactly once in the
+    file on disk today, then **53/54** with one survivor ("distinct instructions reported as the set
+    count"). All of
+    it was real signal about the *older* tests and unusable as a witness for these. Two rules follow:
+    freeze the code and the tests for the whole run, and check the reported mutation count against the
+    file's list length before quoting it. The clean pass — repo untouched, battery launched once and
+    left alone — is **54/54, exit 0**, and it is the only number from this gate in a commit message.
+19. **"The Kaggle bundle is verified at build time" was a claim about a code path no test reached.** The
+    first battery of `bench/mutation_kaggle_bundle.py` caught **21/25**, and the four survivors were all the same
+    species of self-flattery: `WORKING` was only ever exercised through a monkeypatch, so a literal
+    `/tmp` default — a checkpoint Kaggle would never save — passed; `check()`'s sha branch was
+    probed only by *appending* to a staged file, which changes the size, so a size-only comparison
+    survived; and the manifest's provenance plus the build-time verification were never reached,
+    because every test staged a copy that had already succeeded. Three tests now pin the literal
+    `/kaggle/working`, flip one byte **in place** (same size, different corpus), and make `copy2`
+    itself lossy, which is the only way to ask "does the manifest describe the corpus, or the stage?"
+    Second pass: **25/25**. The general form: a test that exercises a helper on a path the caller
+    never takes is documentation, not a gate — and a mutation battery is the only cheap way to find
+    out which paths those are.
+20. **The README's streaming table outlived the correction that named it.** §9.1 flagged the 239×
+    mislabel and the table stayed up, with its laya column intact, until 4a. The column-by-column
+    failures, which §9.1 did not see:
+    * The 2.1×–239.3× "myna speedup" column is **myna against itself** — `myna-full / myna-stream`,
+      both myna, from `bench/bench_stream.py`. It sits in a table headed "Measured on an Apple M5"
+      with a laya column beside it, and the prose around it ("33× faster than laya", "the streaming
+      column is flat by design… laya pays a ~500 ms floor") reads it as a competitor ratio. It never
+      was one; the artifact `runs/bench_stream.md` names its own column `speedup` and computes it
+      from two myna modes.
+    * The "~500 ms floor above 512 tokens" is **truncation, not a plateau**. laya's typed-decisions
+      checkpoint has `max_len` 1024 (`head_max_len` 256), and `system_one`'s own docstring says it
+      truncates silently beyond the window — so every row from 1,024 to 8,192 tokens fed it the same
+      ~1k-token input and cost the same ~510 ms. Its cost stopped growing because its *input*
+      stopped growing. 4a's `laya_tokens_per_row` exists precisely to catch this shape.
+    * "myna answers a 16k-token observation ~17× faster than laya answers an 8k one" divides myna
+      reading 16,384 tokens by laya reading the first ~1,024 of them. Two systems doing different
+      amounts of work is not a comparison, and no re-labelling saves it.
+    * The laya half also went through `Router`, not `Agent.system_one`, and through a local
+      `laya_questions()` shim that *deleted* the `criteria` of every `noul` question — so options per
+      question were not matched either, on the one axis G2's own row names.
+    The rule this buys: a column header has to name both operands, and a plateau in a competitor's
+    cost curve must be explained by that competitor's *input* before it is published as that
+    competitor's ceiling. Sharper still, from `PLAN.md`'s own reading of the same table: it said
+    "laya's re-encode plateaus at ~510 ms (**its 8192 cap truncation region**) and can't serve long
+    states at all. At 16k myna answers ~17x faster than laya answers at its 8k maximum" — the
+    truncation was *known* in the sentence that used it as a denominator, two windows too low, and
+    the same section's third reading ("even myna-full beats laya above 2k") is contradicted by the
+    row printed directly above it (965 ms vs 512 ms). Recording a fact in a log is not the same as
+    applying it; the gate has to be a script that refuses to print the claim.
+    The honest version of the same architectural point survives 4a untouched:
+    myna's answer path really is length-independent (§9.22), and laya really has no cached-state API
+    — which is a capability difference and does not need a ratio to be interesting.
+21. **The "≥ 5× at 50 questions" target compared a laptop to a datacenter GPU and lost.** §2.1 carried
+    `771.3 ms (their measured)` in the baseline column against `≥ 5× faster, same box` in ours — the
+    cell contradicted itself, since nothing about it was on one box until 4a. Measured: myna's
+    50-question p50 on the M5 CPU is **870 ms** (run 1: 812), which is **1.13× (1.05×)** laya's T4
+    wall time — myna takes slightly *longer* than laya did on datacenter silicon, at 29× fewer
+    parameters — and **3.60×** against laya measured on this box. The per-extra-question marginals
+    (myna 17.1 [15.8] ms, laya 71.2 [57.3]) bound the marginal ratio at 3.6–4.2×, so no reading of
+    the same data reaches 5×. The mechanism of the miss is the mixing itself: laya's per-question
+    cost on this CPU is 3.8–4.8× its T4 cost, while myna's whole call is within 13% of that T4 call,
+    so projecting a laptop-scaled myna against a T4-scaled laya manufactured a multiplier. The target
+    is retired as measured, not re-cut: the public claim is **3–4× on one box** plus the
+    length-independence result (§9.22).
+22. **"The cost is flat in context length" is true of the answer and false of the scan.** Both
+    committed runs fit the `ask` path's state slope to **−10.3 [−4.0] µs/token** — indistinguishable
+    from zero — and answering one question from a cached state costs 14.5–17.4 ms p50 whether that
+    state is 66 or 1,060 tokens. That is the fixed-size-state claim with a witness rather than an
+    architectural assertion, and it is the result that survives every retraction in this section. The
+    *scan* is the other half, and §2.1's old "flat cost" cell was simply wrong: within a 256-token
+    chunk `gla_chunked` evaluates the quadratic form, so 66→133 tokens costs **2.85× (3.40×)** for
+    twice the input, and only stops compounding once the state spans several chunks (1.93× [1.72×],
+    then 1.97× [2.20×]). What that does to the headline: myna's sub-40 ms decision is an 87-token
+    result, and at 1,060 tokens with one question the same-box lead narrows to **1.45× [1.25×]** —
+    while at 10 questions on the same state it is **11.6× [11.2×]**, stable across runs. So the
+    advantage lives in the question axis, robustly; in the state axis it lives only as far as the
+    scan's shape lets it. Two follow-ups this exposes — a larger `INFER_CHUNK` for no-grad scans, and
+    a linear-in-chunk scan form — are **unmeasured, so nothing is claimed about either**.
+23. **An absolute p50 from this laptop is not reproducible, and one run was contaminated by me.** Three
+    runs of the same command, laya then myna, at 1/5/10/50 questions: run 1 **117.7/305.5/574.9/2,923.4**
+    and **38.3/95.3/139.6/811.8**; run 2 (its artifact was overwritten by run 3)
+    **101.1/268.3/482.8/2,426.0** and **35.4/73.3/113.2/658.1**; run 3 **100.7/272.0/506.3/3,589.5**
+    and **33.1/74.9/120.8/870.0**. The 50-question row alone spans 22% for laya and 7% for myna, and
+    the e2e ratio for one shape has been reported as 2.86×, 3.04× and 3.08×. Two causes, one of them
+    mine: run 2's ladder was timed while I ran `--help` checks in the same repo, and all three ran
+    while other agent sessions ran pytest on these same 10 cores. What changed as a result: the
+    harness now takes a `flock` on its output path and refuses a second copy (this exists because a
+    duplicate harness PID pair *was* running for ~40 s in this session, interleaving one log), and
+    every ratio cell in §2.1, §2.2 and §4.3 is the **minimum across the committed runs**, so shared
+    cores can hurt our number but never improve it. Not fixed, and stated plainly: this is a
+    development laptop, not a benchmark box, and stable absolute latencies need dedicated hardware —
+    G2 is gated on the ratio, so it does not depend on getting one.
+24. **A risk/coverage curve can be a correct measurement of a model that cannot do the task, and
+    the README must not let that read as a G5 pass.** 5b ran v0 over `calibration.jsonl` — 448 rows,
+    568 questions, 168 question-sets (`runs/risk_coverage.md`) — and the shape is real: accuracy
+    climbs **0.349 → 0.413 → 0.535 → 0.596** as coverage falls 1.00 → 0.60 → 0.20 → 0.10, so the
+    committed-side probability ranks the answers. What is *not* real is any claim of usable
+    confidence: the ceiling is 0.596 against a 0.95 target, the three sources G5 names measure
+    0.000 (banking77), 0.025 (dbpedia14) and 0.150 (trec) at full coverage — each at its own
+    guessing floor, because v0 never trained on this corpus (§4.2) — and raising a threshold on a
+    model that cannot answer is not the product G5 describes. So the artifact ships labelled
+    *harness witness, not a G5 pass*, `g5.pass` is `false` in `risk_coverage.json`, and the gate
+    stays open pending the `KAGGLE` checkpoint (5d). Two further things this run settled, both
+    against my own first draft of the sentence above:
+    * **The curve is not monotone.** Rung 0.90 reads 0.376 and rung 0.80 reads 0.374. That is 57
+      rows changing hands between two adjacent cuts of a 568-row sample — not a bug and not
+      smoothed: the published table prints every rung, so a later reading cannot quietly
+      interpolate the dip away.
+    * **"It agrees with the engine" has to be an executed check, not a property of the plot.**
+      The floor the 0.60 cut selects (0.693) is re-applied to `Myna(abstain_below=0.693)` in the
+      same run, and the engine abstains on **227** questions where the curve puts **227** below
+      that floor. The reason this is a test and not a footnote is the boundary: a floor is read
+      off one real answer's confidence, so that answer sits exactly on the line, and `<` versus
+      `<=` on either side of the comparison moves it — which is why both halves now go through
+      one predicate (`at_or_above`) and `test_the_floor_belongs_to_the_kept_set_and_to_nobody_else`
+      pins the same float against the engine's own `abstain_check`. The same class of boundary sits
+      one line further down in the readout: noul at `p(Yes) = 0.5` commits to *yes*
+      (`pl[1] >= 0.5`), so the harness scores the tie the same way and
+      `test_a_level_tie_is_broken_the_way_the_engine_breaks_it` holds it there — because a
+      coin-flip row is precisely the row the two sides of this pipeline must not disagree about.
+    * **The battery earned its keep once, on the test side.** 49 mutations were written against
+      49 claims; the first pass scored 48/49, and the survivor was `laya_spec`'s noul branch being
+      deleted — which changed nothing because the fixture's noul question carried no `criteria`,
+      the one field the branch exists to drop. The mutation was not wrong, the *sample* was: the
+      suites ship `yelp`/`imdb` noul rows with a criteria dict, so the fixture now uses that shape
+      and the deletion is caught. A battery's survivors are read as holes in the tests, and a hole
+      in a fixture is as load-bearing as one in an assertion.
+25. **"16,384 tokens" was measured about the state, and never about reading it — and the first
+    needle curve says the second claim is false for every checkpoint on this machine.** §2.1's window
+    row and `README.md` both carried 16k as if one number covered both questions. It does not. The
+    mechanism is genuinely measured: the state is 576 KiB at any length, the scan scales linearly,
+    and the answer path is flat (§9.22). Comprehension is a different measurement, and
+    `bench/eval_needle.py` now runs it — a decisive sentence buried at a random position in filler,
+    16 needles per rung, seed 0, `runs/myna-v0`, 6-way so the uniform floor is 0.167:
+
+    | state tokens | 128 | 1,024 | 4,096 | 8,192 | 16,384 |
+    |---|---|---|---|---|---|
+    | needle accuracy | 0.188 | 0.312 | 0.312 | 0.125 | 0.062 |
+
+    v0 is at the floor *at the shortest rung* (0.188 against 0.167, where one standard error at
+    n=16 is 0.093), which means the rows after it cannot be read as decay: there is no recall here
+    to lose. The 16k figure is worse than chance rather than merely low, and neither of those is a
+    long-context result — it is an out-of-distribution task wearing a long-context costume, because
+    no checkpoint on this box was ever trained to answer a buried-desk question, let alone at 16k
+    (v0's training states are ~90 tokens). What §2.1 now says, in its own row, is
+    *measured (state)* / **not met (accuracy)**; the 16k comprehension claim is G4's, it is gated on
+    the `KAGGLE` long-context checkpoint (7b), and until that checkpoint exists the honest sentence
+    is "myna carries a 16k-token state at fixed size" and not one word about understanding it.
+    The harness change this forced is the part worth keeping: `eval_lengths` now refuses its own
+    curve (`baseline_verdict`) when the shortest rung does not clear the uniform floor by the
+    margin, and prints `G4: NOT MEASURED here` instead of a table a reader could quote as decay.
+    A low curve and a meaningless curve print identically otherwise, and only one of them is
+    interesting in the direction people want.
+26. **Two numbers in the export path were labels, and reading the artifact out loud fixed both.**
+    6a shipped `meta.json` with `"opset": 17` because that is what was passed to the exporter. It is
+    not what the exporter wrote: torch warns that 17 is below its implementations, emits opset 18,
+    and its fallback version-converter aborts with a `RuntimeError` that is printed and then
+    survived — so the metadata asserted a property of a file that did not have it, and the fix is not
+    the number but the source (`opset_actual`, read back from each graph with `onnx.load`). The same
+    mistake in the other direction was the byte budget: `files_mib` summed `*.onnx` and reported
+    0.43 MiB for a model with 36 MB of weights, because the dynamo exporter stores initializers in a
+    sibling `*.onnx.data`. `bench/mutation_onnx.py`'s first pass caught exactly that — deleting the
+    `*` from the glob survived two rounds of assertions, because a threshold like "> 0.01 MiB" cannot
+    distinguish a skeleton from an artifact; what catches it is reading the graph and requiring the
+    reported size to cover the bytes its own initializers declare.
+    What the honest numbers now say is worse news than the draft implied: the two graphs are
+    **35.6 + 58.13 MiB fp32 — the trunk twice over** — so §2.1's ≤ 20 MB int8 target cannot be met by
+    quantising each graph on its own. Either the weights are shared between them or the browser
+    carries one graph and calls it twice, and that is now 6b's premise rather than a surprise at the
+    end of it.
+27. **Three of the browser battery's 24 mutations survived on the first pass, and two of those were
+    the instrument's fault, not the code's.** `bench/mutation_browser.py` edits one line of the
+    JavaScript implementation at a time and requires `node browser/selftest.mjs` to go red, so a
+    survivor normally means an untested property. These three did not all mean that:
+    * **The scan loop had two sufficient exits.** Disabling its `if (take.length < chunk) break;`
+      survived because the loop *bound* — `fed < ids.length || fed === 0` — already stops an empty
+      document after its one padded call. The program was right and the mutation was wrong, so the
+      mutation was replaced by the one that attacks the same property from the side that is actually
+      load-bearing (dropping `|| fed === 0`, which dies on the empty-document check), and the
+      redundancy is now listed in the battery's own "deliberately absent" section instead of being
+      quietly kept as a passing line.
+    * **The score answer's expectation was compared as `null` against `null`.** The two probe floors
+      in `browser/expected.json` were 0.9 and 0.9995, and at both of them the `score` question
+      abstains — so `readout` returned `null` for `score`, the engine's want was `null`, and
+      `probs.reduce((a, p, j) => a + j * p)` could be rewritten as `a + p` (which is 1.0 by
+      construction, i.e. always wrong) while the gate printed green. Two fixes: a third floor at 0.6,
+      below every argmax this checkpoint produced (the softest is 0.7802), so all three types have a
+      committed case; and `parity.mjs` now asserts that coverage rather than assuming it — a type
+      with no committed case fails the gate and says *"no committed score case: its commit-branch
+      arithmetic is never compared"*. An instrument that reports only what it happened to reach is
+      how a gate stays green for a quarter of its life while one of its six checks tests nothing.
+    * **The byte total was never added up.** Per-file equality held while the printed *sum* was
+      rewritten to count only `*.onnx`, producing "4.15 MiB across 6 files" next to a 54 MiB
+      `weights.bin` — the exact shape of the 6a bug §9.26 records, arriving again through a second
+      door. What catches it is comparing the printed total against the directory's own total, which
+      is what the node gate now checks in the same line.
+28. **int8 meets ≤ 20 MB and misses the parity bound by 648×, and the tab is barely faster for
+    it.** §2.1's browser row carried a single compound target — "≤ 20 MB int8" — that was really two
+    claims, and measuring them separately split them. `bench/quantize_int8.py` runs onnxruntime's
+    dynamic quantisation over the *exported graphs* (not a fresh torch model, so the artifact
+    `bench/mutation_onnx.py` gates is the thing being shrunk) and re-shares the result through the
+    same `share_weights`: the artifact is **18.56 MiB**, inside the target, and the wire is 32.33 MiB
+    once the 13.58 MiB wasm runtime is counted (`runs/browser_g3_int8.json`). onnxruntime-web 1.30
+    runs the result — `MatMulInteger`, `DynamicQuantizeLinear` and `DequantizeLinear` are all
+    implemented in the wasm build, which was the assumption most likely to kill this route and it did
+    not. What killed it is the agreement: chained state **2.67e-02** relative and option
+    probabilities **6.48e-02** absolute against the fp32 gate's 1e-4, i.e. four of the tab's six
+    checks green and the two that carry numbers red. The three decisions' *labels* were unchanged on
+    that document — one document, 525 tokens, three questions, which is not a suite and is not
+    offered as evidence that quint8 is safe at 77 options. And the speed the loss bought is small:
+    p50 **413 ms** against fp32's **436 ms** at 10 threads (5%, inside the run-to-run spread §9.23
+    measures on this box, and the int8 sweep ran at a *higher* load average) and 757 ms against
+    742 ms single-thread, i.e. slower. So the byte target is met and the artifact that ships is
+    fp32; reopening int8 needs a quantisation tolerance argued against the decision suite, not
+    inherited from the fp32 export's bound.
+
+
+
+29. **int8 on MLX: 3.17× the bytes, 0× the milliseconds, and 9.24e-03 of agreement — and the
+    reasoning that predicted a win was wrong twice.** Two earlier drafts of this finding were both
+    wrong in the same direction, and both were killed by arithmetic rather than by the clock.
+    (a) "the linears are a small share of the model, so quantising them cannot matter":
+    they are **99.4%** of the per-state-token work — 13,565,952 MACs through the matmul'd weights
+    against 82,944 in the attention (the state read/update and the causal intra-chunk piece,
+    counted at chunk 16 from the shapes in `runs/myna-v0/model.pt`; the split is not sensitive to
+    how generously the attention terms are counted). (b) "then it must be
+    bandwidth-bound and int8 will win": weight-only int8 removes bytes from the *weight* read and
+    no MACs, so the whole claim rests on the kernel being starved, and `bench/diag_mlx_int8_gem.py`
+    says it is not — at myna's own shapes the fp32 matmul already runs at 55–257 GB/s of weight
+    read on this box and the quantised one at **10–37 GB/s**, so `mx.quantized_matmul` spends more
+    unpacking group-64 int8 than `x @ w.T` spends reading fp32, and 5 of the 6 shapes are outright
+    slower (ratios fp32/int8 0.43–1.06). Between (a) and (b) sits a measurement bug worth naming:
+    the first version of that probe enqueued 200 matmuls and evaluated only the last array, so the
+    other 199 nodes were unreferenced, never ran, and the probe printed 0.4–3.1 µs/op with int8 up
+    to 1.31× ahead. Holding every node and syncing once costs 3.3–28.7 µs/op and reverses the
+    sign. A microbenchmark whose nodes can be garbage collected is measuring Python.
+    The engine-level result is the honest version of all this: **no latency claim on the int8
+    path**, sign of the int8 − fp32 delta flipping between two committed runs on 4 of 7 state
+    lengths while fp32's own spread reaches 15.2% (§5 P6 6c). So the artifact that ships for Apple
+    is fp32 — 55.13 MiB, 1.76–2.22× over torch-MPS — and 17.40 MiB int8 stays in the tree as a
+    measured option for whoever needs the bytes for a different reason (a memory-constrained
+    unified buffer, say), not as a speed route.
+    Second correction, about the target rather than the number: **"`≤ 20 MB int8`" was one cell and
+    is now two.** §2.1 carried it as *the* int8 target; §9.28 killed it on wasm agreement
+    (6.48e-02 = 648× the fp32 bound) and this pass kills it on Apple latency, for the opposite
+    reason — MLX int8 reaches 9.24e-03, ~7× tighter than wasm's, and is refused because it is not
+    faster. A single "int8 status" line would have hidden that: the two paths fail differently, so
+    each now has its own row and its own §9 entry. And the reopen condition is not "find a better
+    quantiser" — it is that a *latency* route needs a kernel whose dequant pass is not the
+    bottleneck, at which point the agreement question has to be re-argued against the decision
+    suite anyway (the 1 flip in 20 above sits on a 0.0008 reference margin, so probability-error
+    bounds alone would not have caught it, and keeping `.gate.weight` in fp32 changes 9.24e-03 to
+    9.53e-03 and flips the same row).
+
+30. **The headline cells were copied from prose, so eight of them were wrong — the labelling pass
+    (P8 8a) killed them all.** Not one bad number but seven, in three files, and they share a
+    mechanism: a figure was *typed into* README/PLAN/SPEC from a run's summary rather than *copied
+    from* the artifact, and each retyping was allowed to round, merge or misremember. The dead
+    cells, each with the line that buries it:
+    - **"v0 dev 0.968 / test 0.951 overall."** Neither number is an overall. `runs/train-v0.log`
+      prints no overall at all — it prints nine per-question rows under `=== dev ===` and nine
+      under `=== test ===`, whose macros are **0.9599** and **0.9523**. 0.9682 is a `dev-mid`
+      probe line (steps 7500, 8000 *and* 8500 print it), and `dev_probe` is the first
+      `--eval-n` rows of that same dev split — 192 by default, so a subset scored every 500 steps,
+      not an overall. And "0.951" is printed by no artifact in this repo. The macros are now
+      computed from the log's own rows, and the sentence that quotes them says "macro of the nine
+      rows", which is the only honest way to average what is actually committed. (The probe's row
+      count is itself unrecorded — the log carries no argv, so 192 is read off the current default
+      and cited only to say the probe is a subset, not the final eval.)
+    - **"dev→test gap is 1.7 points."** It is **0.76** (0.9599 − 0.9523). 1.7 was 0.968 − 0.951 —
+      arithmetic on two numbers that were themselves wrong, which is the fastest way to compound
+      an error: a derived cell looks more precise than its inputs and inherits both mistakes.
+    - **"~3.7 h."** The log's elapsed counter at step 8999 reads **15,693 s** = 4.4 h. The earlier
+      figure was hours-by-eyeball from a partial line, and it appeared as "~3.7 h" in one file and
+      "~3 h" in another.
+    - **"3,000 synthetic examples."** Deleted rather than corrected, because *nothing records the
+      corpus size* — `train.py` logged the vocab and the parameter count and not the row counts.
+      The nine printed test accuracies each round to their 4-dp value at 1200 rows per workflow
+      (3,600 test rows) and at no smaller n — searched over n = 50…4000, the only solutions are
+      1200, 2400, 3600, 4000 — but that is arithmetic on printed rounding, so it is tagged *p* in
+      PLAN.md and not quoted as a measurement. Fixed forward: the trainer prints its own `cmd:` and
+      one `split <name>: N rows over M groups, per-group lo-hi` line per split, guarded by
+      `tests/test_train_logging.py`.
+    - **"14.7–17.4 ms to answer one question from a cached state."** The 1-question `ask` p50s on
+      the published ladder are 17.433 / 16.082 / 14.52 / 14.59 / 14.70 ms, so the band is
+      **14.5–17.4** — the low end was the 1,060-token row mistaken for the minimum, which is a
+      one-keystroke error that survives any amount of rereading and dies to one `min()` over the
+      ladder. Same pass: "R² 0.74 vs myna's 0.99" now quotes all three fits from the witness's own
+      `fit` block (laya 0.7356, myna end-to-end 0.9915, myna ask-only 0.9619), because two rounded
+      R²s in one sentence read as one number restated.
+    - **"ECE ≤ 0.04 everywhere."** Test ECE runs **0.0115–0.0415** and dev **0.0080–0.0438**; both
+      maxima exceed 0.04, so the sentence was false in the direction that flatters. Related and
+      subtler: §9.11 quotes the dead claim it corrects as "v0's dev ECE ≤ 0.042" — 0.042 is the
+      *test* max, with dev's 0.0438 not reachable at all (dev's temperature fit is what makes it
+      optimistic). The §9.11 correction still stands on its own point; only its number was
+      labelled with the wrong split.
+    - **"15.35M measured" in §2.1.** True of the default `MynaConfig` (15,353,984 params at
+      vocab 4096) and false of the artifact the project ships: v0 has **14,449,280** params,
+      because its tokenizer learned 1,740 entries. `runs/bench_mlx_int8.json`'s `n_params` says so
+      and `runs/train-v0.log` printed both at the time. §2.1 now carries both counts with their
+      configs; "measured" was never the issue, *which configuration* was.
+    - **"dev accuracy up to 0.9657" from the RLCD pass.** The number is real
+      (`runs/rlcd_v0.log`: 0.9626 → 0.9657, mean ECE 0.0191 → 0.0076, mean Brier 0.0258 → 0.0232)
+      but it is not *this* dev: `rlcd.py` regenerates the split at 600 rows per workflow under its
+      own rng stream, so 0.9626 and the headline 0.9599 are different samples of the same
+      distribution and their difference is sampling, not training. The publishable claim is the
+      before/after pair inside one draw, which is what README now says.
+    Two instrumentation gaps came out of the same pass. `runs/latency_matched.md` and its run-1
+    sibling record platform, device, thread counts, reps, both checkpoints by path and commit, and
+    both dtypes — and no load average and no argv, because §9.23 was written after they ran. That
+    is disclosed in PLAN.md rather than quietly re-run (a third run could only lower a minimum, and
+    §2.1's ratios are minima), and `bench_latency_matched.py` now writes
+    `meta.load_avg_after`/`meta.cmd` and prints them in the markdown header, so the next P4 run is
+    restatable. And a "~0.6 MB" in an API docstring became 576 KiB once measured: the S stack is
+    589,824 B (the `state_bytes_total` every `runs/browser_g3.json` row prints), while the saved
+    file for a 51-token thread is 592,533 B — the token list is the difference, and unit drift
+    ("~0.6 MB", "~100 KB") is exactly what a measured figure in the same sentence prevents.
+    The structural lesson is the convention §2.1 now uses everywhere: every headline cell carries
+    its own tag — ***m*** measured from a file in this repo, ***p*** projected by arithmetic from a
+    model we did not open, ***g*** gated — and the artifact it came from, because a table can only
+    be audited cell by cell. A whole-table "all numbers measured" label is what let nine wrong cells
+    ride together.
+31. **The reproduction registry's own doc check was vacuous, and the mutation battery said so
+    before it ever printed a red row.** P8 8b added `bench/reproduce.py`: 19 rows, each binding one
+    published table to the command that regenerates it and to the committed artifact whose bytes the
+    prose quotes. One of its three assertions was "a doc still prints this command" — and README's
+    new *Every table* section is generated from `ROWS`, so it prints all 19 commands by construction.
+    The assertion could not fail; `--check` was green on 19/19 the day it was written and would have
+    stayed green if every one of those commands had been deleted from the prose around its table.
+    Caught only because `bench/mutation_reproduce.py` was about to be run and the entry
+    *"the docs are read one file at a time, so only README counts"* looked like it would survive —
+    which was the signal that README alone was already sufficient, i.e. that the whole `DOCS` tuple
+    was decorative. Fix: `doc_text()` cuts everything between two markers around the generated block
+    before matching, so only hand-written prose counts as evidence, and the assertion immediately
+    went **7/19** — twelve rows' commands lived nowhere but in the index that echoed them. Those
+    twelve are now printed next to the tables they belong to (README's architecture, browser, MLX
+    and trained-v0 sections; §4.1, §4.2 and §5 P3 3c here), one of which —
+    `bench/check_python311.py` — had to be re-run to rewrite its log, because the harness gained its
+    `$ <cmd>` provenance line *after* `runs/python311_check.log` was committed, and §4.2's sentence
+    about that first line was true of the file only from the rerun onward. Two sibling invariants
+    moved from test assertions into `check_row()` for the same reason: a row quoting no falsifiable
+    figure, and the runner's refusal to launch a `gated-kaggle` or `retrain` row. A rule that lives
+    only in a test is a rule the source can drop without anything noticing. Battery:
+    **21/21 caught** (`runs/mutation_reproduce.log`, 25 tests in `tests/test_reproduce.py`), and
+    every `--run` mutation is paired with a test that passes `--dry-run` — the scratch repo symlinks
+    `runs/`, so a battery that launched a real harness would overwrite the witnesses it is checking.
+    The general form, which is the one to look for next time: *when a checker generates part of what
+    it checks, the generated part is not evidence.* The count it produced was green, and green was
+    the sound of it reading its own output back.
+32. **A competitor cell the suite asks two ways was scored by whichever row its JSON wrote
+    last, and that inflated every published laya figure by about 0.008.** P8 8c joins
+    `bench/eval_laya_real.py`'s witness to myna's table inside `src/myna/report.py`
+    (`laya_cells()`), and the two sides do not share a key: myna's cell is
+    `(source, question)`, laya's row is `(source, qid, type)` — because the suite asks
+    `contrastive/decision` *both* as a 4-way choice and as a noul. Seventeen rows, sixteen
+    cells, and `laya_cells()` was a dict comprehension over the rows, so the 24-answer
+    choice row (0.417) was silently overwritten by the 16-answer noul row (0.625) and the
+    cell was published as **0.625 over 40 answers**. Which row survives is the one whose
+    `type` sorts last (`eval_laya_real.py` writes `sorted(acc.items())`), and on this
+    witness that happened to be the higher-scoring one — an accident of the alphabet, not
+    a bias, and the kind that reads as a result. Merging by answers instead
+    ((0.416667×24 + 0.625×16)/40 = **0.500**) moves, recomputed from the same committed
+    witness: the 16-cell MACRO over the cells both sides scored **0.674628 → 0.666815**,
+    the *shared-instruction* stratum's laya column (14 cells) **0.681718 → 0.672789**, and
+    the control's published gap **−0.3285 → −0.3207** against myna's 0.3462. The
+    *per-row-instruction* stratum moved by exactly nothing — two cells, neither of them
+    contrastive — which is the signature of this bug class: one bad cell, and every
+    average that contains it carries the error without being able to name it.
+    What caught it was a test written for an adjacent reason: one that deletes a cell the
+    competitor never scored and re-derives the 15-cell intersection from `data["rows"]` by
+    hand (`test_a_cell_the_competitor_never_scored_moves_the_floor_too`) rather than reading
+    the figure back out of the function under test. Two implementations of the same average
+    disagreed by more than a deleted cell can explain, and the disagreement was in the one
+    that was shipping. Fix: `laya_cells()` indexes a *list* per cell and merges by answer
+    count, returns the `rows`/`parts` it merged, `main()` prints the merged cell in full
+    (`contrastive/decision is 2 rows of that JSON over 40 answers: choice 0.417 (24) +
+    noul 0.625 (16) → merged by rows to 0.500`), and `--out` carries `laya_merged` so the
+    prose that quotes 0.500 has a field to quote. `bench/mutation_report.py` grew four
+    entries for it — restore last-row accuracy, restore last-row `n`, empty `laya_merged`,
+    drop two-row cells from the join instead of merging — and the battery went 54 → 67 with
+    all 67 caught (`runs/mutation_report.log`).
+    The same mistake, one file over: §4.1's per-source list had three cells that were not
+    per-source. `agnews 0.950` is `agnews/topic`, one question of that source's five, whose
+    row-weighted figure is **0.915**; `yelp 0.825` is `yelp/recommend`, one of two, against
+    **0.650**; and `contrastive 0.625` is this entry's 16-answer noul row, against **0.500**
+    for the source. Only a single-question source was safe to quote that way — eight of
+    eleven cells, so the list was 73% correct and read as if it were 100%. The eleven
+    figures now printed are recomputed from the witness's own rows and their weights sum to
+    the 546 answers whose row-weighted mean the harness itself prints (0.6319), which is the
+    check that a per-source list is a *partition* and not a selection.
+    The general form: *a join is a claim about keys.* Either the right-hand side is unique
+    per key, and something asserts it, or the join aggregates — and then the aggregation has
+    to be printed, because a merged cell is a different quantity from either row and a
+    reader cannot tell which one they are being shown. A comprehension over rows is how a
+    uniqueness assumption hides: it cannot fail, it just keeps the last one.
+
+33. **A branch no input could distinguish sat in the ordinal loss, and its mutation
+   survived its own battery; the fix was to delete the branch, not to write a harder
+   test.** P9 9a gave `typed_loss` an `ordinal`/`opt_valid` pair that arrives either
+   per-row (`[B,N]`, `[B,N,O]`) or shared across the batch (`[N]`, `[N,O]`), the same
+   two forms the question tensors have carried since P2. The first version expanded the
+   shared form by hand — `if ordinal.dim() == 1: ordinal = ordinal.expand(gold.shape[0],
+   -1)` — which reads like a shape contract and is not one: broadcasting already turns
+   `[N]` against `[B,N]` into exactly the tensor the expand builds, and a shared-form
+   mask *by definition* says the same thing about every row, so no input exists in which
+   the two forms disagree. `bench/mutation_ordinal.py` proved it the only way that
+   counts — `if ordinal.dim() == 1:` → `if False:` left all 18 tests green — and so the
+   branch is gone, with the contract now living in a comment on the arithmetic and in
+   `test_the_shared_and_per_row_forms_agree`, which is the witness worth keeping because
+   it can still fail. Two rules fall out. *A battery entry that cannot fail is evidence
+   about the code, not about the battery*: either the instrument is under-sized or the
+   branch is dead, and the two are told apart by trying an input in which they should
+   disagree. *An explicit broadcast is not documentation* — writing a conversion the
+   language already performs buys a line nobody can test.
+   The same run produced its exact opposite, which is why the rule is not "delete
+   defensive masking". The `* opt_valid` that bounds the CDF sum to a cell's own options
+   looks equally redundant, because a caller that masked its logits to -1e9 makes every
+   tail term `(1 − 1)²`; and `MynaModel.forward` does mask them. But `typed_loss` cannot
+   see that — it receives a tensor — and the value of a sum over `O` columns is *not* the
+   value of a sum over the cell's `K` options for a caller that built its logits by
+   hand, which is what three of this file's tests do. Masked away, the mutation is caught
+   by exactly one of them (`test_the_builder_masks_feed_the_loss_in_the_order_the_loop_
+   passes_them`); that single test is the reason the multiply stays and the reason its
+   name is written down rather than left to the next reader.
+
+34. **A committed report table put its macro row six columns right of the header it
+   belongs to, and 29 tests, 125 assertions and 67 green mutations were satisfied by
+   it.** `runs/scratch_decision_v2_test.md` and both `runs/report_*.log` carry the
+   per-stratum macro line that `table_text` builds. Its label,
+   `  macro over its 14 scored cells`, is 32 characters and the label field was 26
+   wide, so the row's first figure ended at column 59 where the header's `model` ends
+   at 53: every average in the most-quoted line in the artifact sat under the column to
+   its left. No number was wrong — the misplacement cost nothing but meaning — which is
+   precisely why it survived three rounds of this file's reporting work. Every
+   assertion in `tests/test_report.py` greps a line and looks for a substring;
+   `bench/mutation_report.py` mutates formulas and values; and `bench/reproduce.py
+   --check` asks whether a quoted figure is present in its witness. All three were
+   green on the misaligned table, and all three would still be green today if the
+   widths had been left alone.
+   What found it was a *new* column. 9c's `clip` and 9b's `brier` are honest only if a
+   figure sits under its own header, so the test added for them
+   (`test_the_macro_row_lands_in_the_same_columns_as_the_cells`) reads each line by
+   character offset, with the offsets derived from the printed header rather than from
+   a constant — and the first run showed the macro row one field out of place. The fix
+   is structural: `LBL`/`WID` and one `_trow` that the header, every cell row and every
+   macro row pass through. Adding the columns then produced a second failure pointing
+   the other way: with seven numeric fields, a six-character delta butted against the
+   Brier figure and the table printed `0.312-0.125`, which a reader takes as one number.
+   No assertion about column *edges* can see that — right-aligned fields land a
+   six-character value on their edge whether or not anything separates it from its
+   neighbour — so `WID`'s last field 7→6 survives every positional check and needed an
+   instrument of its own (`assert not re.search(r"\d-\d\.\d", ln)`). The battery now
+   carries the label-width mutation and the field-width mutation as separate entries,
+   because they are failures in opposite directions and only the second one was visible
+   before anything was written about it. `LBL`'s 21 stopped being a design taste too: it
+   is this split's widest real cell name, `contrastive/decision` at 20, and the test
+   asserts `LBL > widest` over `cell_stats(load_split(...))`, so a future source with a
+   longer name breaks the build instead of the table.
+   The general form: *a number's column is part of the number.* Position is a claim
+   about which quantity a reader is being shown, no value assertion can see it, so a
+   table with more than one row type needs at least one test that reads by offset — and
+   widths have to be checked both for overrunning and for touching. The process form
+   matters more: `--check` verifies that a figure is in its witness and that a doc
+   quotes its command, and it does **not** re-run the command, so an artifact can carry
+   a layout its own code would no longer produce, indefinitely and green. Re-rendering
+   the control to settle this produced a determinism witness for free —
+   `runs/scratch_metrics_test.json` came out byte-identical (sha256 `99f54cb0…`), seeds
+   0/1 printed 0.346/0.351 again, and every per-cell figure matched the copy it replaced.
+   Layout moved, nothing scored did, which is what licenses saying the re-rendered
+   artifact is the same measurement better drawn.
+35. **"The memory plan is a property of the corpus."** The code made it a property of the *run*.
+   `state_token_p95` sampled its rows with `random.Random(args.seed)`, so changing the experiment's
+   seed changed the p95, which changed the batch the plan approved — measured on the full pilot:
+   p95 267 with batch 15 at seed 0, p95 274 with batch 14 at seed 1, from one command over one
+   corpus. No published figure moves, because every run this repo has published used seed 0, where
+   the seeded draw and the fixed `random.Random(0)` default are the same sample. What nearly
+   happened is an ablation whose two arms trained different batch sizes for a reason no comment
+   mentions, and the assertion that caught it was one a reviewer would call over-strict: a
+   comparison script demanded all four arms share a batch, and it was *right* to fail. The fix went
+   into the call site (`p95 = state_token_p95(tok, sample)` — the function's own default), not into
+   relaxing the assertion. The general form: **a control that differs from its treatment in more
+   than the variable under test has compared two experiments.** Read it off the runs rather than
+   off the launcher — `bench/ordinal_ab.py` reconstructs each arm's flags from that arm's own
+   `cmd:` line and asserts a pair differs only in `{--score-loss, --seed, --out}`, then checks the
+   two arms of a pair on batch, p95, `last_step` and "did not stop early".
+36. **A delta averaged across seeds whose headline moved in opposite directions.** The first read
+   of the `ce` vs `emd` ablation quoted the resolution ratio *pooled over both seeds* (0.5194 dev,
+   0.8765 test) and concluded "below 1, not resolvable". The conclusion stands; the evidence offered
+   for it did not. Pooling three priced cells across two seeds hid the fact that on test, seed 0
+   clears its churn floor (ratio 1.7591) while seed 1's mean is 0.0 — the two draws
+   disagree, which is a different finding from "both small" — and the number that actually carries
+   the verdict is the sign agreement across seeds (2/3 dev, 1/3 test) beside macro deltas of
+   −0.011828/+0.003155 and +0.007952/−0.001408. The pooled arithmetic was not wrong; it was the wrong unit,
+   and it erred *toward* the negative result, which is the direction nobody audits.
+   `runs/ordinal_ab.json` stores the per-pair figures first and the pooled ones under
+   `pooled_over_seeds`, and the judge prints the pooled line labelled as the one to distrust. The
+   general form: **average across replicates only when they agree** — a mean over contradictory
+   draws is a number no arm produced, and it will look like whichever conclusion the averaging
+   accidentally supports.
+37. **One run, two "test macro" numbers, and the launch doc quoted the flattering-to-doubt one.**
+   For a session every sentence about `v1b-kaggle-3600b` said *test macro 0.3983*. That figure is
+   real — `/tmp/kgwork/diag_dev_cells.json` prints `0.3982739096904652` — and it is not the number
+   G1 is written against. It came out of the permutation-diagnostic harness, whose roll-up is over
+   the cells *that* harness chose to score, with *its* filters; the release roll-up over the 16
+   cells both myna and laya score, per-cell unweighted, prints **0.4893271976084137** from the same
+   weights and the same split (`runs/v1b_kaggle_3600b.report.json`, computed by the command
+   `bench/reproduce.py`'s `v1b-kaggle-macro` row re-runs). The gap between them is not rounding and
+   it is not symmetric: 0.3983 says myna is 0.302 under the 0.70 target, 0.4893 says 0.211 under it,
+   and the smaller number made "the gap is a dose problem" look likelier than the artifact supports.
+   What fixed it is not "pick the right one": it is that **a roll-up is a named statistic with a
+   cell set and a weighting, and a gate may quote only the one whose command is committed.** The
+   diagnostic's figure is now quoted in the launch docs solely as the number *not* to quote; the
+   release report prints `macro/acc` beside `macro/cells_scored` (16) and `macro/cells_kept` (16),
+   so the cell set travels with the value instead of living in the prose; and §9.30's rule gets its
+   sharpened form — *the witness has to bind the number and the unit*, because a committed value
+   under an uncommitted roll-up is still a projection about which statistic was taken.
+38. **"Dev was flat from step 2,250" — a slope carried in prose for a session, and the committed
+   log says otherwise.** That claim was in the launch docs and in the reasoning behind them: it is
+   why the 3,600-update run looked converged, why dose was framed as the wrong question, and part
+   of why nobody re-bought the lane. The log does not say flat. `grep -E "dev-mid acc"
+   runs/v1b_kaggle_3600b.train.log | uniq | tail -5` prints the run's own tail — 0.4122 at 2,250,
+   0.4283 at 2,500, 0.4319, 0.4336, 0.4321, and **0.4355 at 3,500, which is the run's high** — so
+   the last 1,000 updates gained **+0.0072** and the curve was still rising when the cosine
+   schedule spent out, and the jump from 2,250 to 2,500 alone is +0.0161, which is not a flat
+   region by any reading. (The `uniq` is load-bearing: the box wrote every progress line twice,
+   and `bench/reproduce.py`'s `kaggle-dev-tail` row commits both the tail and the doubled-log fact.)
+   The correction does not rescue dose, and it is worth being precise about which way it cuts:
+   extrapolating the *measured* tail slope over the 6,400 extra updates per arm in the 10k lane
+   projects ≈ **+0.046**, against the +0.211 G1 needs — so the conclusion "more steps is not the
+   answer" survives, but it survives on a number rather than on a remembered adjective, and the
+   price of testing it is now computable: 5.62 s/update measured from the same log means the pair
+   is ≈31.2 GPU h against a 30 h/week quota.
+   The general form: **a slope is a figure, not a mood.** Before a remembered curve shape prices
+   GPU hours, re-read it from the artifact with the command that prints it committed — because
+   "flat" and "+0.007 per 1,000" imply different decisions, and the second one is a number a
+   reader can check.
+39. **Two mutation batteries had been refusing to run for a tick, and the repo kept citing their
+   logs.** `bench/mutation_gates.py` and `bench/mutation_reproduce.py` both print
+   `baseline (unmutated) copy is RED -- the battery proves nothing` and exit 1 — the guard
+   working correctly — and this went unnoticed because the last thing anyone reads from a battery
+   is its `N/N caught` line, not its exit code. The cause was the scratch, never the checker: each
+   battery builds a temp repo out of `src/ bench/ tests/` plus a **hand-maintained list** of
+   top-level files, and two things changed underneath that list — `tests/test_gates.py` grew a test
+   that reads `Makefile`, which neither list ever contained, and `reproduce.DOCS` grew two launch
+   docs while `mutation_reproduce.py` kept its own copy of the same tuple. So
+   `runs/mutation_gates.log`'s committed `baseline copy: green` line described a tree that no
+   longer existed, which is §9.34's finding wearing a harness: an artifact witnesses one run, not
+   the current one.
+   Both scratches now derive the file set from the filesystem (`*.md` + `pyproject.toml` +
+   `Makefile`) instead of a second list, and re-running them writes logs that are **byte-identical
+   to the committed ones** — the same 17 mutants, the same 21, all caught, exit 0 — which is the
+   evidence that the checker under test never changed and only the harness had been quietly
+   disabled: **gates 17/17, reproduce 21/21**. That sentence is where this entry's own rule bites:
+   it ends `alongside mutation_kaggle_bundle.py's 39/39`, and that third figure was inherited rather
+   than re-run — which entry 40 turns out to be a story about a battery that could not have printed
+   it. The general form: **a guard that aborts is only as good as the habit of checking that it
+   fired** — a battery that refuses is honest, but an unfixed refusal turns every later green
+   claim about it into a report about the past.
+40. **The mutant that entry 39's own last line quoted had never been survived — because the test
+   that catches it was ready to run the job.** `bench/mutation_kaggle_bundle.py` carries
+   `the dry run runs the job` (`if args.dry_run: return 0` → `if args.dry_run and False:`), and its
+   docstring explained that the probe is cheap: *"a test that asks for one update so the mutant
+   costs one update"*. That was true of one of the seven `--dry-run` call sites in
+   `tests/test_kaggle_bundle.py` and false of the first one. `pytest -x` reaches
+   `test_dry_run_prints_the_exact_command_and_nothing_else` before the cheap one, and that test
+   invoked the entrypoint at the **default dose** — so the mutant does not cost one update, it
+   costs ten thousand on the CPU of whoever is checking. Measured 2026-09-28: the battery stopped
+   after `[13/40]`, and `ps` inside it showed `myna.train … --steps 10000 --batch 32 --vocab 8192`
+   alive at 11 minutes, which I killed by PID. Worse, `pytest_in` had carried `timeout=1800` with no
+   handler since the file's first commit (`e032bd3`, where the mutant and the uncapped test already
+   coexisted): past half an hour that battery's end state is a `TimeoutExpired` traceback, and
+   `subprocess.run`'s timeout kills only the child it spawned, so the trainer is left reparented
+   and the MacBook hot. Which of the two the run would have become, nobody found out, because the
+   wait ended by hand at 11 minutes — and that is the whole epistemics of this entry: the figures
+   quoted for the battery (`25/25` at §5 P3 3b, `39/39` in entry 39) were neither observed nor
+   refuted, they were inherited. Two fixes. `_run_py` now appends `MINI_DOSE` (`--steps 1 --batch 1
+   --vocab 128`) to any `--dry-run` that did not name a dose — steps alone is not a cap, the batch
+   and the vocabulary are what the seconds go to — and `pytest_in` runs pytest in its own process
+   group (`start_new_session`) and `killpg`s it, so a hang costs 600 s and leaves nothing running.
+   Capping the print has a price the repo should not have paid twice: the printed command stopped
+   carrying the defaults, so `"--steps 10000"`, `"--batch 32"` and `"--vocab 8192"` left the
+   assertion loop. A test that reads `run.DEFAULTS` without launching anything took their place,
+   and two new mutants (`"steps": 10_000`→`500`, `"batch": 32`→`512`) exist to prove it bites, and
+   both are caught by that test and by nothing else. The battery is now **42/42 caught, exit 0**,
+   logged to `runs/mutation_kaggle_bundle.log` and committed, because §9.30 is the rule this entry
+   exists to learn from; `the dry run runs the job` is caught at `[16/42]` by the test it was always
+   meant to fail.
+   The general form: **a probe has to be affordable by the test that answers it** — a mutation
+   whose honest cost is a training run is a mutation nobody re-runs, so the figure decays into
+   inheritance. And entry 39's rule applies to entry 39: it named the habit of checking that a
+   battery finished, then quoted this battery's `39/39` from the record rather than from a run.
+41. **dbpedia14's "unexplained dev→test collapse" was two roll-ups of one run, not two
+   measurements of one quantity.** The item carried out of `v1b-kaggle-3600b` said dev 0.5324 falls
+   to test 0.2047 across 37 question-sets per side, called that "too large to call overfitting
+   without looking", and told whoever read it next to investigate before trusting the test macro.
+   Both literals reproduce exactly today as the **unweighted mean over `evaluate()`'s per-set keys**
+   of the committed `runs/v1b_kaggle_3600b.metrics.json` — and the cell's own shape says why that
+   roll-up cannot carry a conclusion: 116 rows sit in 37 sets, **36 of which hold exactly one row**
+   (`runs/v1b_kaggle_3600b.report.json`: `n=116 sets=37`; the dev render's strata block: *"37
+   exact-signature sets, 0.69 of rows in a reused set"*). So 36 of the 37 terms are 0-or-1 coin
+   flips, and because dev and test share **one** signature between them the pair never was the same
+   quantity twice. On the basis the shipped report actually uses — accuracy **row-weighted within each
+   cell** across the question-sets that hold it, then an unweighted mean over the 16 cells (entry 37's
+   "per-cell unweighted" is that outer step, and it is a different thing from this inner one), because
+   *"an unweighted mean lets a 1-row group outvote a 116-row one"* — the cell is dev **0.647** →
+   test **0.457**: a −0.190 drop against a **0.129** majority floor, which makes it one of the cells
+   furthest *above* guessing rather than the suite's weak point. And −0.190 does not need a
+   mechanism: over the 16 cells both splits score, mean |Δ| is 0.079 with sd 0.089, five other cells
+   move by ≥ 0.10 (agnews/topic −0.164, sst5/sentiment −0.163, amazon/stars −0.138, agnews
+   is_scitech −0.113, is_business −0.104), and imdb/positive swings +0.125 the other way; overall
+   macro is dev 0.5356 → test 0.4893. The dev half is now an artifact of its own —
+   `uv run python -m myna.report --split dev --metrics runs/v1b_kaggle_3600b.metrics.json \
+   --out runs/v1b_kaggle_3600b.dev.report.json > runs/v1b_kaggle_3600b.dev.report.log` — which is the
+   committed metrics re-rendered, not the run repeated: no GPU, no re-run of a gated lane, and
+   `bench/reproduce.py` row `v1b-kaggle-dev` re-reads 0.5356, `n=116 / sets=37` and the 0.647 line out
+   of it.
+   The distortion is not local to dbpedia14, and the suite-wide count is the number to carry: of the
+   per-set roll-up's own terms, **414 of 690 dev (60.0%) and 417 of 716 test (58.2%) hold exactly one
+   row**. Delete those terms and the same unweighted mean reads **0.6756 dev / 0.6092 test** instead of
+   0.4355 / 0.3983 — so the basis was never a rounding choice; it moved the headline by 0.240 on dev
+   and 0.211 on test, and a roll-up where the majority of terms are single-row cannot support a claim
+   about a *model* at all. One consequence for entry 38, which this clause does not undo: the training
+   log's `dev-mid acc` ladder is `train.macro_acc`, i.e. this same per-set basis — its last rung prints
+   0.4355, and the committed dev block's per-set mean is 0.43547, the same statistic to the four places
+   both print. The **slope** §9.38 measured
+   (+0.0072 per 1,000 updates) stands, because it pairs one basis against itself across steps; but
+   0.4355 must never be read as the level of a dev run that the report puts at 0.5356, and a reader who
+   does will "discover" a 0.100 gap that is pure bookkeeping. **The item is closed with "nothing
+   to find", and G1 is untouched** — 0.4893 against 0.70 stays *not met* on entry 37's basis.
+   The general form: **read a dev→test delta on the basis the artifact publishes**; a gap between two
+   aggregations of one run is a fact about the aggregation. One trap sits on the way to that rule, and
+   it looks like waste: the
+   37 sets come from 11 (dev) / 10 (test) distinct legend *key-sets*, because `_signature` hashes
+   the criteria dict in the row's own order. That fragmentation is load-bearing, not waste —
+   `parse_questions` resolves each gold through `list(crit).index(lab)`, so grouping rows whose
+   legends agree only up to order would keep the first row's option list and silently mis-index
+   every later row's label. Canonicalising the key without canonicalising the options would turn a
+   noisy cell into a wrong one.
+   The same re-check was then run against the repo's other negative result, because its verdict
+   sentence quotes a macro: `runs/ordinal_ab.json`'s `meta.macro_dev/macro_test` are `macro_acc`, i.e.
+   the per-set roll-up, and on the report's per-cell basis its "macro moves opposite ways in the two
+   seeds" reads dev −0.0013 / +0.0053 (still opposite) and test +0.0071 / +0.0005 (same sign, the
+   second one nil). **The verdict does not move**, because it never rested on that clause — the
+   resolution ratios are computed from per-cell deltas of the priced cells against the churn floor of
+   the unpriced ones (dev 0.5194, test 0.8765), which is the same basis `myna.report` uses. What the
+   check buys is a rule: **a quoted macro has to name its basis, and a null has to be re-derived on
+   the other basis before anyone calls it an artifact of this one.**
+42. **§9.40's defect lives in the driver too, and sweeping it across all 14 batteries found no
+   second unaffordable probe.** The entry above capped the test that answers a mutant; it did not cap
+   the loop that runs the batteries. Measured 2026-09-28: the first sweep script iterated
+   `paraphrase report p5 longctx onnx mlx ordinal scratch` with no per-battery deadline, so one hung
+   battery would have sat inside its own uncaught `timeout=1800` and then serialised everything behind
+   it — an hour of fan for a summary nobody can read. It was stopped mid-`onnx` at PID 32557 plus its
+   `onnxruntime` children (exact PIDs; a broad `pkill` is not available to this repo while anything may
+   be training), and parts 2 and 3 ran every battery under a `SECONDS`/`kill -0` watchdog at
+   `CAP=2400`/`1800` — a killed battery prints `TIMEOUT`, keeps its partial log, and that partial log is
+   the witness that it did not finish. The watchdog itself was checked against a dummy `sleep 600`
+   first (rc=143 after 8 s, process confirmed gone) rather than trusted. All 14 then finished inside this
+   session: paraphrase **29/29** · report **93/93** · p5 **49/49** · longctx **20/20** · onnx **22/22**
+   (1,200 s wall, two graph re-exports per mutant) · mlx **14/14** · ordinal **19/19** · scratch
+   **13/13** · gates **17/17** · reproduce **21/21** · browser **24/24** · latency-matched **34/34** ·
+   memory plan **44/44** · kaggle bundle **42/42** — **441 mutants, 441 caught, zero `MISSED`, zero
+   `BAD-PATTERN`, zero `TIMEOUT`**, summed from the 14 files in `runs/mutation_*.log` (11 of them
+   rewritten from these runs; each closes with an `EXIT=0` line naming the wrapper that produced it).
+   What this entry is *for* is the negative, because a green sweep reads like nothing happened. The
+   static half of the audit predicted it: `grep` for `myna.train`, `run.py` and `--steps` across
+   `bench/mutation_*.py` returns only the kaggle bundle, so `MINI_DOSE` is the single place a probe can
+   reach training; two batteries handle a timeout (`mutation_browser.py` gives its `node` selftest 180 s
+   and turns `TimeoutExpired` into a *caught* mutant with the reason printed — the right shape), and the
+   remaining twelve carry `timeout=1800` uncaught, which costs a slow exit rather than a training run.
+   So the process-group refactor stayed in the one file with evidence against it instead of being
+   spread over thirteen "for consistency", which is the same speculative reach that produced the mutant
+   in entry 40. The general form: **a driver that runs a probe owes the probe the same affordability
+   rule** — an uncapped wrapper inherits the cost of every uncapped probe inside it. And a sweep that
+   finds nothing gets written down anyway, because the alternative is a later session re-running it or
+   "fixing" batteries that were never broken.
+43. **"Every published table row has a command that regenerates it" was checked by reading
+   files, so it never asked whether the command runs.** `bench/reproduce.py --check` makes three
+   assertions per row — the witness is committed, the witness still prints the quoted figure, the
+   docs print the command verbatim — and all three are answered from disk. A row that publishes
+   `--score-loss emd` against a build that renamed the flag passes every one of them: the artifact
+   was written while the flag existed, the docs still quote the line, and `git ls-files` still
+   returns it. The registry's own history is full of the rename: `--free-gib`, `--warm-start`,
+   `--seed` resizing the step (§9.34), and 9g's `MINI_DOSE` cap, which *removed* three flags from a
+   printed command line and had to be paid for with a new test and two new mutants. None of that
+   would a file-reading checker have seen.
+   `--check` now makes a fourth assertion, and it asks the tool: every row whose command names a
+   python target (`-m module` or `script.py`, after skipping a `uv run` launcher and a `VAR=value`
+   prefix) is run as `<this interpreter> <target> --help`, and every `--flag` the row publishes has
+   to appear in the answer. Nothing but `--help` is ever executed, so no row can launch a run from
+   inside its own gate — §9.40's rule applied to the registry — and a `--help` that hangs costs
+   `HELP_TIMEOUT` and becomes a report, not a traceback (mutant 20, caught by the test that sets
+   `HELP_TIMEOUT = 0`). The measured result on 2026-09-28 is a **negative**: 20 of the 27 rows are
+   python commands, all 20 answer, and every flag they publish is accepted. The gate costs
+   **0.72 s → 5.85 s** in one process with the same cache cold each time (measured by stubbing
+   `command_problem` to return `None` and re-timing `--check`), and stayed at **27/27**. Seven rows go unchecked and say so: three `npm` scripts
+   (gated for real by `bench/mutation_browser.py`, which runs the node selftest), two `grep` lines
+   over a committed log, `uv run pytest tests/test_report.py`, and the `gated-kaggle` row, which is
+   prose — feeding it to `shlex` raises on the apostrophe in `eval_laya_real.py's`, which is exactly
+   the mutant (`a gated Kaggle row is asked to parse as a shell line`) that the committed-tree test
+   catches. Battery: **29/29 caught** (8 new, `runs/mutation_reproduce.log`, 270 s), tests
+   `tests/test_reproduce.py` **33**.
+   One stale literal surfaced on the way, in the gate's own docstring: `mutation_reproduce.py`
+   described a weakened checker as one where "`--check` still says **19/19**", a registry size that
+   had been overtaken three ticks ago. It is now corrected to 27/27 in place, because a count inside
+   a battery's explanation is read as a claim about what the battery guarantees — and entry 39 is the
+   rule that a number like that decays into inheritance.
+   G7's prose in `bench/gates.py` names what the registry guarantees, so it gained the fourth
+   assertion; README's release table re-renders from that string under a test and SPEC §2.2's row is
+   copied by hand, which is the one place this repo has prose that can fall behind generated text.
+   Because the file the gate battery mutates changed, `bench/mutation_gates.py` was re-run rather
+   than inherited: **17/17 in 240 s** (`runs/mutation_gates.log`).
+   The general form: **a check that reads files proves what was written, not what still runs — where
+   a command is part of the claim, ask the command.**
+44. **Entry 43 named the seam and left it open: §2.2 is the one gate cell typed by hand, and
+   nothing read it back.** `bench/gates.py` counted its own registry — `27 registry rows`,
+   `58 quoted figures`, `18 rows re-run on this box`, and the rest — in two sentences that a test
+   compared with `ROWS`, while SPEC §2.2's G7 row repeated the same numbers in its own words and
+   no test and no gate ever looked at them. The words had already drifted apart once — P9 9f
+   found `22 rows` written in G7's prose beside a registry of 23 — and the only reason the two
+   agreed on 2026-09-28 is that 8e re-synced this row by hand to write §9.43 into it. A number
+   that agrees because somebody remembered it is not a check.
+   `registry_counts()` now derives all seven phrases from `ROWS`, `count_phrase()` says the
+   five-status half once and G7's note interpolates it, and `check_gate` — for any gate whose
+   proof *is* the registry, which today is G7 alone — reads §2.2's cell off disk and reds on each
+   phrase it no longer prints. So the gate that certifies reproducibility is the first one whose
+   own spec row can contradict it. Falsified both ways, in the committed tree and against a live
+   count: deleting `58 quoted figures` from the row goes red naming that token, and growing `ROWS`
+   by one row goes red on `28 registry rows` — which is what
+   `test_specs_g7_row_prints_the_registry_it_actually_has` does rather than what it says, because
+   a literal count baked into `registry_counts()` would pass the first and fail the second.
+   Battery: `bench/mutation_gates.py` **17 → 21** mutants, **21/21 caught, exit 0** in **334 s**
+   (`runs/mutation_gates.log`, re-run rather than inherited because this tick changed the file the
+   battery mutates). Two of the four new entries are the theatre shapes §9.43 warns about — the
+   comparison that runs and never reports, and the table read from the wrong column so a count it
+   cannot find is a count that always matches — and each is caught by that same test.
+   `tests/test_gates.py` **28 → 29**, and the older prose test lost its hand-built token list to
+   `registry_counts()` so the phrasing has one home instead of three. The asymmetry is disclosed
+   rather than tidied: `gates.py` reads its G7 sentences off `ROWS` at import, README's release table
+   renders from them and is therefore not evidence (§9.31), and §2.2 stays typed — it is the prose
+   a human reads, so it is the prose that has to be asked. What still has nothing reading it back
+   is a battery log: `17/17` appears in entries 42 and 43 as what those ticks measured, which is
+   why both are dated, and the rule that keeps such a number honest is the existing one — re-run
+   the battery whose subject changed, and say which one you re-ran.
+   The general form: **a count in prose is either generated from the artifact or read back against
+   it — the third option is a number that decays into an inheritance.**
+45. **9d was the one open decision in the repo, and it had no numbers beside it.** Two cells
+   (`banking77/intent`, `mnli/relation`) answer below their own majority floor and their
+   association numbers do not beat their own permutation nulls, which makes them dead rather than
+   mis-measured; whether they belong inside G1's scope is a call only the user can make. What could
+   be done here was to price it: `bench/scope_pricing.py` subsets the committed report's own `cells`
+   and calls `myna.report.macro` and `g1_verdict` on each scope, so the question "does dropping them
+   help?" answers as arithmetic instead of as hope.
+   It does not, and the reason is the trap in the question. G1 is a level *and* a margin over the
+   floor the surviving cells imply, and the cells myna wins are also the ones a majority classifier
+   wins, so dropping the dead ones lifts both sides: 0.4893 → 0.5334 on the level, 0.4331 → 0.4666
+   on the floor, margin +0.0563 → +0.0668 — **eleven-thousandths of the 0.094 still missing**. "Drop
+   their whole sources" is not a third option, it is the same 14 cells (each of those sources
+   contributes exactly one cell to the published scope), and even the indefensible cherry-pick —
+   every one of the 5 cells below its own floor out, 11 left — lands at 0.5526 / +0.0949, still
+   0.147 short of 0.70. **No scope choice in the table makes G1 pass**, so 9d is a decision about
+   what the published claim means, and nobody should spend GPU hours on the expectation that a
+   scope edit rescues the run.
+   The harness rule that makes the table trustworthy is the one §9.37 and §9.41 taught: the
+   arithmetic is *imported*, never restated, and the unfiltered row has to reproduce the report's
+   own published 0.4893 / 0.4331 / `g1.pass` to the digit or the script refuses to print anything.
+   A second implementation of a roll-up is how one run gets two "test macro" numbers, and a scope
+   table computed by hand would have been the third. `tests/test_scope_pricing.py` (**18**; **11**
+   when this entry was written, and §9.46 is what made the difference visible) holds
+   the line in both directions — the row-weighted basis over the same 16 cells is asserted *not* to
+   reproduce 0.4893, because a control that any aggregation would pass proves nothing — and one test
+   edits the report's published macro and requires the guard to raise. Registry: `scope-pricing`,
+   **28 rows / 61 figures**, and this is the first tick where §9.44's read-back bites for real: the
+   added row moved G7's own counts (18 → 19 rows re-run here), and §2.2 went red until it was
+   re-synced.
+   The general form: **an open decision the user owns can still be prepared — price every option out
+   of committed artifacts, refuse to tick the box, and hand over the arithmetic with the trap named.**
+46. **The scope harness had 11 tests and they could not see two thirds of it.** §9.45 shipped
+   `bench/scope_pricing.py` with a test file beside it, and the repo's §7.1 rule ("a test that cannot
+   fail is not a gate") had nothing to say about the harness until `bench/mutation_scope_pricing.py`
+   ran for the first time: **10 of 24 mutations caught**. The survivors' *shape* is the finding, not
+   the tally — every one of the 8 mutations inside the pure `price()` arithmetic died, and **none** of
+   the 13 elsewhere did: 0/5 against the guard's individual comparisons (drop the `majority`
+   comparison, point the `myna` comparison at the report's `uniform` field, delete the `g1.pass`
+   check, widen `TOLERANCE` from 1e-12 to 0.05 — fifty times the smallest difference the table
+   exists to measure — the script still refused a
+   *doctored macro*, which is the one case the shipped test tried, so a guard that had stopped
+   checking was indistinguishable from a guard that worked), 0/5 in how the witness is assembled
+   (the `cmd` line, the `published` headline row, a `scopes` dict missing its control row, the two
+   cell lists), 0/4 in the printed table — the artifact README and the 9d note actually quote —
+   and 0/1 on the missing-`--report` boundary. `main()` had never been run successfully by anything:
+   no test asserted it exits 0, no test read what it prints, no test compared its output to the
+   witness in `runs/`. A harness that printed three scopes instead of four, or lost the line naming
+   its own command, kept a green suite.
+   Closed the same tick, in the order §7.1 prescribes: the battery reported, seven tests were written
+   against the reported holes (guard per compared field, verdict, the not-on-disk boundary, a clean
+   `main()` run whose regenerated JSON must equal the committed witness byte for byte minus its own
+   `--out`, and a `capsys` test that each row line carries that row's own cells, floor, margin and
+   verdict under the headers that name them), and the second pass is **24/24 caught, exit 0** in
+   **17 s** (`runs/mutation_scope_pricing.log`, baseline copy green with 18 tests). Suite:
+   **466 passed / 1 skipped in 193.95 s**; `test_cli_help.py` gained the harness and its battery, so
+   `--help` cannot become a run.
+   The pass also corrected one hand-copied count it did not cause: §3.4's map said **312 passing**
+   where the repo now collects 467 — 154 tests behind, in the one section written in present tense
+   (§9.44's decay, in a doc that had no read-back over it; the registry's counts do, the map's do
+   not, and this tick updated it by hand for the same reason it updated the others). The 51-vs-54
+   mutation count this pass first "found" was itself wrong — `grep` against `HEAD` showed the line
+   never existed — which is §9.44's rule turned on the instruments reading them: a count is quoted
+   from the artifact, and the artifact here is `git diff`.
+   The general form: **tests written beside a harness in one sitting inherit the harness's blind
+   spots — they pin the numbers that were interesting and skip the plumbing that decides what gets
+   printed. Read a battery's survivors by which half of the file they sit in: 8/8 in the pure
+   function and 0/13 everywhere else is a sentence about the tests, not about the mutants.**
+47. **Tier 0 read the trained model's inputs, and half of decision-v2 never reads the state.**
+   P9's three defects were named from accuracies, and an accuracy cannot say *which input* the
+   answer came from — while three pillars of the architecture say it should be recoverable: the
+   probe reads the question, the option spans carry the labels, the state carries the evidence.
+   `bench/diag_question_ablation.py` scores the committed V1-B test split six ways, one forward
+   pass per arm per row, through `myna.train.build_batch` and `evaluate()`'s own chunking, with the
+   roll-up imported rather than restated (§9.41) — so `as-scored` *is* the statistic G1 was judged
+   on, and the guard is that it must reproduce the report's 716 per-question-set accuracies key for
+   key before anything prints. It did: **0.4893271976, 716 keys, 0 single-row tie flips**, in
+   **186 s of CPU for all six arms** — no GPU, no retrain, no new data. Macros, with `Δ` against
+   `as-scored` (floor 0.4331, uniform-floor macro 0.3321): `blank-instruction` **0.3341 / −0.1553**,
+   `permute-instruction` **0.4927 / +0.0034**, `cross-source-instruction` **0.4364 / −0.0529**,
+   `blank-options` **0.2669 / −0.2225**, `swap-state` **0.4173 / −0.0720**.
+   Three readings, each forced by a named arm. (i) **Option descriptions are the answer channel.**
+   Blanking them — same `K` spans, text replaced by `option 1..K`, so the pointer head still gets a
+   span per label — costs more than any other arm and lands *below* the uniform floor, 0.2669
+   against 0.3321: the head is not reading position. That puts a committed artifact behind P9's
+   "the mechanism is not broken, the cost function is", and it does not retire the sentence's
+   caveat — the option-*order* permutation magnitudes that sentence declines to quote are still
+   uncommitted, because Tier 0 asks a different question of the same spans (§9.30 is per figure, not
+   per conclusion). (ii) **The cue is read as a bag, per source.** Blanking it collapses the model
+   (−0.1553), permuting it within a source changes nothing (+0.0034) because nine sources print one
+   cue text on every row — which is why every arm also prints how many strings it actually rewrote,
+   260/716 for that one — and substituting a *cross-source* cue of the same option count costs
+   −0.0529. (iii) **Half the cells do not read the state at all.** Eight of sixteen print
+   `state-Δ` of exactly **+0.000**, and all eight also commit their most-predicted label to a larger
+   share of rows than the gold majority holds: an association, not evidence. Three are `noul` cells
+   emitting one label on *every* row and finishing on their own floor to four decimals
+   (agnews/is_scitech 0.6531, agnews/is_sports 0.8085, agnews/is_world 0.7778); the stateless eight
+   are those three plus amazon/stars, banking77/intent, contrastive/decision, mnli/relation and
+   sst5/sentiment. The arm is not a no-op — 1,164 of 1,176 states were rewritten, and it moves the
+   other eight cells, six of them by more than 0.06 (dbpedia14/category −0.388, imdb/positive
+   −0.275, yelp/recommend −0.250, yelp/rating −0.137, trec/answer_type −0.078, agnews/topic
+   −0.060).
+   One count this entry published first and then re-derived is corrected here rather than deleted:
+   an earlier draft said **ten** of the sixteen cells answer from an association. No rule over the
+   committed distributions yields 10 — **8** at or below their own majority floor, **3** constant
+   predictors, **13** over-emitting their top label, **8** exactly state-invariant, and that last
+   pair's intersection is **8**, not 10 (§9.44: a count travels with the rule that produces it).
+   Why this is a diagnosis and not a fix. The lever it points at is the input distribution, so it is
+   P10's question, priced there — and priced *small*: three of the stateless eight sit inside the
+   six cells `--anti-prior` reaches, and the other five already carry train majorities below the
+   skew threshold, so an inverse-prior re-weighting has almost nothing to remove for them.
+   The gate stays visibly open, and the row that was added to close half of it names the other
+   half: this harness scores `model.pt` from the Kaggle-side checkpoint directory, whose *figures*
+   are committed and whose *weights* are not.
+
+   ```bash
+   uv run python bench/diag_question_ablation.py --run-dir runs/v1b-kaggle-3600b \
+       --out runs/diag_question_ablation.json
+   ```
+
+   That line re-runs nowhere today, and saying so is the correction this tick exists for. The
+   67.7 MB of weights it was measured against lived under `/private/tmp`, which is ephemeral, and
+   the directory is gone as of 2026-09-30; the committed `runs/diag_question_ablation.{json,log}`
+   still carry the absolute paths the measurement actually used, because a witness is written once
+   and read forever and is not edited to look tidy. So the published line now names the directory a
+   re-run of the 3,600-update dose writes — `runs/v1b-kaggle-3600b`, the same convention every other
+   row uses — instead of a temp path that no longer resolves. `make repro` keeps it a `retrain` row:
+   it ties the six arm macros and the 716-key guard to those committed artifacts and asks the tool
+   that every flag in the line still exists. What it cannot do is re-derive the table for a reader
+   holding only this repository, and after the temp clear it could not do that for this box either.
+   That asymmetry is the honest shape of the artifact, not an omission.
+   The general form: **an accuracy is a claim about an input. Ablate the inputs before buying
+   parameters, and read a per-cell delta's exact zero as a finding rather than as a rounding — a
+   cell whose score does not move when its evidence is replaced is not under-trained, it is not
+   looking.**
+48. **The P10 lever was built, gated 41/41, and nothing on the launch path could pull it.**
+   `--anti-prior` went into `myna.train`, `bench/anti_prior_audit.py` measured what it reaches, and
+   `bench/mutation_anti_prior.py` closed every mutant it had — across three passes: 25/28 caught on
+   the first (the 3 survivors all inside `draw_row_batch`), 28/28 on the second, and after 13 more
+   mutants aimed at what the harness *prints*, **41/41 caught** with a baseline green on 35 tests in
+   53.90 s (`runs/mutation_anti_prior.log`; 36 min for the 41). None of that made the open GPU
+   decision runnable: `kaggle/run.py` — the file the launch docs tell a human to run — had no
+   `--anti-prior`, and `campaign.py` generated cells for the `--score-loss` pair but not for this
+   one, so 10c could only have been executed by editing the staged bundle on the box. The registry
+   could not see the hole either: `--check` asks a tool's `--help` about the flags a row *publishes*
+   (§9.43), and until this tick no row published the audit's command.
+   **What the 13 printed-face mutants taught is §9.46 run backwards.** That entry's finding was
+   that tests written beside a harness inherit its blind spots — 0/13 of `scope_pricing`'s
+   non-arithmetic mutants died. Here all 13 died on the first try, and the difference is the seam:
+   every one of those tests asserts against output `main()` produces *inside the test*, and the
+   scratch repo symlinks `runs/`, so a witness-reading test could not have seen a mutated harness
+   at all. Labeling both arms under the control arm's name, printing the natural majority in the
+   realized column, reading the mix delta off the wrong arm, counting rows per question set so every
+   denominator becomes a set count, and pricing the shared-set batcher instead of the row batcher —
+   each is now a red test.
+   Three claims that had already shipped were corrected the same tick, all by re-deriving them from
+   the artifacts rather than remembering them: **"ten of sixteen cells"** (Tier 0's count is eight —
+   the invariant set and the over-emitting set intersect at 8 and no rule over the committed
+   distributions yields 10, §9.44); **"~31 GPU hours"** for the P10 pair (that is the *10k* paired
+   lane; two arms at the published 3,600 updates cost 2 × 5.618 s/update × 3,600 = **~11.2 h**, and
+   the constant came back to `runs/v1b_kaggle_3600b.train.log`'s `step 3599 … 20225s`); and the
+   flag's own help text, which promised that "on the 10 cells whose prior is already flat it changes
+   nothing" — the audit measures nine of those ten moving anyway (down to 0.163, contrastive/decision
+   0.507 → 0.337) and **one sharpening** (yelp/rating 0.203 → 0.259), because a yelp row answers two
+   questions and the weight is computed on the other one. A sentence about what a mechanism does
+   *not* reach is as much a claim as a number, and was as unverified.
+   Two more, about the record rather than the measurement. **`EXIT=0` in that log is inferred, not
+   watched** — the battery ran under `nohup`, the shell that would have echoed `$?` was gone, and
+   the pass body was written from the absence of a `SURVIVED:` line. Correct as reasoning, wrong as
+   an instrument: a battery is a measurement, so it gets launched `; echo EXIT=$? >> log`. And the
+   dedupe: `tests/test_anti_prior.py` defined **four test functions twice** — 109 duplicated lines,
+   two byte-identical blocks — because a rewrite this session inserted the corrected block instead
+   of replacing the old one. Python kept the last definition, so the file collected 35 tests while
+   defining 39, and the two dead copies still *looked* like gates: one of them carried the
+   reduced-dose ranking assertion this tick had deliberately removed, i.e. the file's visible face
+   contradicted its shipped reasoning. `tests/test_kaggle_bundle.py` now fails on a duplicate `def`
+   anywhere in `src/`, `tests/`, `bench/` or `kaggle/`, which is the class, not this instance.
+   The general form: **a lever the trainer has and the launcher lacks is not a feature, it is prose
+   — plumb it through the entrypoint, generate the paired cell, and give the harness a registry row
+   in the same tick, because the gate that asks the tool about published flags cannot see a flag
+   nobody published. And a green suite is not a claim that the suite is the one you think it is:
+   count definitions as well as collected tests.**
+   Then §7.1 was paid against the launcher (§5 P10's 10b): `bench/mutation_kaggle_bundle.py` 42 →
+   **48 mutants, 48 caught, exit 0**, six over the P10 plumbing. One of those six is a finding of the
+   same family as §9.46 and it was measured before being written: the test that proves the two GPU
+   cells differ in *exactly one flag* proves it by normalizing `--anti-prior on` and `--anti-prior off`
+   to one token — so the mutant that hardcodes `off` in the generator, i.e. the bug that would spend
+   ~5.6 GPU-hours to re-run the control arm twice, went green. Running that mutant against the test
+   with the added `assert f"--anti-prior {arm}" in cell(name)` line deleted printed **32 passed**: the
+   normalization that makes two things comparable is what deletes the difference the check is about, so
+   a comparison test must assert the raw values on both sides *and* the sameness of everything else.
+   The battery's own wall time is also now stated as bounded-by-polls rather than stamped, because this
+   driver was launched without `ts` per line — §9.40's lesson one step further out, into the wrapper.
+49. **A commit subject can be a published figure too, and this one was wrong the moment it was
+   typed.** `e9c73c1` opens `10c: §7.1 paid against the launcher`. 10c is the GPU pair, and it is
+   still unspent and still `- [ ]` in both §5 and TODO — what that commit did was finish 10b's gate
+   obligation for the launch path. Nothing in the tree was wrong: the plan's checkboxes, the
+   registry row and the launch doc all say the pair has not run. The record that drifted was the
+   history, and history is the one artifact no `--check` reads. Not amended (a local rewrite is
+   still a rewrite of something already cited); corrected here, so anyone reading `git log` and
+   then §5 finds this entry between the two. The rule: **a tick ID in a subject is a claim about
+   the plan's state, so it gets read back against the checkbox before the commit is made** — the
+   same §9.44 discipline, applied one file earlier.
+50. **The one artifact this project cannot rebuild was kept in a temp directory, so shipping
+   weights stopped being an intention and became a process.**
+   *Superseded on its central claim, same day: the weights were recovered from `~/Downloads` and the
+   recovery was hash-verified — §9.53(i)–(ii). What that entry got wrong is not the risk model (a
+   temp directory is still the wrong home) but the word "filesystem-wide", which described a search
+   of `/tmp` and `/private/tmp`. Everything below is kept as written because it is what was true when
+   it was written.*
+   V1-B's `model.pt` and `tokenizer.json` lived under `/private/tmp/kgwork`. That directory is gone
+   — `ls` on the path fails and a filesystem-wide `find` for `v1b-kaggle-3600b` returns nothing —
+   and what survives of the run is only what git holds: `runs/v1b_kaggle_3600b.{metrics,report}.json`
+   and `.train.log`. So the *level* is quotable (0.4893 test macro) while the *weights* are not, the
+   asymmetry §9.47's tail had already been forced to write down for the Tier 0 row. The price of the
+   loss is bigger than one number: every arm that wanted to warm-start from that checkpoint (§9.41
+   names the same gap) and every re-derivation §5 P0 still lists as open is now unspendable. §9.49's
+   "still unspent" survives as a claim about the GPU quota, but on the local lane this entry
+   supersedes it.
+   The regeneration 10c needed anyway got the durability rule attached in the same pass. Both arms
+   run through the canonical launcher on the M5 — `runs/pair_driver.sh` calls `kaggle/run.py`, which
+   prints the expanded command into `runs/antiprior_off_s0/train.log`, and the two arms differ by
+   `--anti-prior` alone. `runs/ckpt_backup.sh` then ships each arm's weights to a GitHub Release with
+   nobody awake for it: the first stable `model_last.pt` as a mid-run insurance copy, then the final
+   `model.pt` plus `tokenizer.json` once the driver writes that arm's exit line. Both are box glue
+   under `runs/`, which `.gitignore` keeps out of the tree — what is published here is the rule and
+   the launcher command, not a wrapper with this laptop's absolute path in it. The uploader was
+   proven before it had anything real to upload — it created a throwaway release, read the asset back
+   at its exact **40,000 B**, and that release was deleted — because an unattended process that
+   publishes is not allowed to fail for the first time at 07:00. And the run's own weights sit in the
+   repository working tree rather than under `/private/tmp`, which is already a different failure
+   class: a reboot does not clear it. Only a disk fault or a `git clean -xdf` does, which is what the
+   insurance copy is for — the first one is `antiprior_off_s0`'s step-250 `model_last.pt` at
+   **203,229,625 B**, roughly three times the final `model.pt` because it carries the optimizer and
+   scheduler as well as the weights, and it shipped: the watcher logged the file stable at 00:53:16
+   and the release went live 19 minutes later, which GitHub stamps `publishedAt
+   2026-09-30T19:27:29Z` — the two clocks agree once the box's UTC+05:45 is applied, and saying so
+   here because an hour reading a mismatched timestamp would conclude the artifact was invented.
+   That log is committed as `runs/ckpt_backup.log`, since the entry is making a timed claim and §9.30
+   does not exempt a process just because it is a shell script. GitHub's own asset digest is the
+   checksum a reviewer should verify against — `model_last.pt` on that release carries
+   `sha256:db124b8fdb6a04afa5a626e20acdac9470c66c73d520f368eb6ff0b1b4281cdf` — so "these are the run's
+   weights" is a download-and-hash claim, not a promise. It is *not* checkable against this laptop:
+   `model_last.pt` is a rolling snapshot, the step-500 write landed at 01:20 and re-hashed the local
+   path to `770bf49afe30b96264b34f5cc3ae29ee3ba1f937e512942a0d1fd81d83a928e5`. Same 203,229,625 B,
+   different weights — which is the reason the watcher ships on a size-and-stability trigger and not a
+   filename, and the reason a step-250 checkpoint has to leave the machine before step 500 arrives.
+   That is also why a staged run dir reports its step as *not
+   recorded*: `train.py` writes `model.pt` as `{state_dict, cfg, temperature}` and puts the step only
+   in `model_last.pt`.
+   Three things this run must not borrow, said here so the next reader does not try. (i) It is not a
+   Kaggle measurement, and the wall price belongs to this lane: the ~11.2 h in §5 and §9.48 is the
+   T4's price and 0 hours of the 30 h/week quota are spent. This box reads **6.52–6.82 s/update** in
+   the windows between snapshots, 7.27 in the one that carries the step-250 eval and checkpoint
+   write, and 6.75 averaged over the first 480 updates — the log stamps one line per 60, so this is
+   a rate read off a live log rather than a stopwatch, and it is a *mid-run* rate from 480 of 3,600
+   updates that the completed log will supersede (§9.48's bounded-by-polls). Against the T4's
+   measured 5.618 that is 1.20×, i.e. ~6.75 h per arm and ~13.5 h for the pair. (ii) The pair is a
+   control only if it reads the corpus V1-B read, and
+   neither end prints a corpus hash — the mount carried a
+   `SOURCE_SHA256.json` that `runs/v1b_kaggle_3600b.train.log` names without quoting. What closes the
+   chain is statistics derived *from the data*, identical on both sides: `train question-sets:
+   17112`, `params: 16926848`, and the memory plan's `p95 267 tokens` row width — and
+   `runs/v1b_kaggle_3600b.metrics.json` records the same two derived values as its own keys,
+   `state_tokens_p95: 267` and `batch: 10`. On this side `data/decision-v2-pilot/train.jsonl` re-hashes
+   on 2026-10-01 to the `sha256_train` pinned in `upstream_manifest.json` —
+   **`5f5f93ff7ca03e4522dbe5bdff50e0a92cd5467d613d32d6a5988b8a00870a64`**, `MATCH`. One wording
+   difference that is not a difference: V1-B's plan line reads `--batch 32 exceeds it, using 10` and
+   this arm's reads `batch 10 fits`, because the requested flag differs while the *effective* batch is
+   10 in both. The honest remainder is that the Kaggle end of the corpus chain is a filename.
+   (iii) The arm is not a bitwise replay of V1-B and must not be sold as one. At step 250 it prints
+   `dev-mid acc 0.3682` where V1-B's log prints **0.3401** — same seed, same corpus, same effective
+   batch, different device, so the float trajectory differs update by update. The pair therefore
+   prices `--anti-prior` against a *fresh* control on this box; it says nothing about whether that
+   control reproduces 0.4893, and a reader who wants that comparison owes it to the T4 lane. The
+   check worth reading when each arm's `metrics.json` lands is `paraphrase_draws`: V1-B records
+   **225547** over 17,112 sets, and an arm that matches it has pushed the same data through the same
+   re-wording plan — a tighter fingerprint than any single line in a log.
+   The general form: **a checkpoint is an artifact only where git or a release can be read back.
+   Whatever took GPU hours to make gets a remote copy in the same pass that produces it, the
+   publishing path gets proven against a throwaway asset before the real one exists, and a rate
+   lifted from another machine's log is labelled as the price of that machine rather than of the
+   result.**
+51. **"The suite is green" was a sentence about this laptop, and CI has never run a single
+    test.** Every count published since the push — 556 passed, 1 skipped, and the §3.4 line that
+    carries it — was measured here, where `mlx` is installed. On `ubuntu-latest` it is not: `mlx`
+    is an optional extra (`[project.optional-dependencies] mlx = ["mlx>=0.20"]`), and CI's install
+    step was bare `uv sync`. So `tests/test_mlx_int8.py` line 22 did a plain
+    `import mlx.core as mx` at module scope, and `gh run view --log-failed` on all **7** runs this
+    repo has ever recorded — 36771444494 back to 36749769385, every one `failure`, each finishing in
+    29–48 s — prints the same four lines:
+    `ERROR collecting tests/test_mlx_int8.py` → `ModuleNotFoundError: No module named 'mlx'` →
+    `Interrupted: 1 error during collection` → `Process completed with exit code 2`.
+    **Zero tests executed**, on every run, since the repo went public. The wall time is the
+    tell you can read without the log: those 557 items take **294 s** on this box, so a job that
+    finishes in 29 s *including* checkout and dependency install ran none of them — and the 556-green
+    sentence next to a red Actions tab is what a reviewer reads first.
+    The bug is one line wide and the distinction is not cosmetic. A module-level `import` of an
+    absent package raises during *collection*, which aborts the whole session;
+    `pytest.importorskip` raises `Skipped` and costs one file. The file that already got it right —
+    `tests/test_mlx_parity.py` — imports `mlx` *inside* each test body, which is why it never took
+    the suite down with it.
+    The probe was falsified before it was believed, twice. The first blocker used
+    `find_spec`'s predecessor `find_module`, removed in Python 3.12, so it blocked nothing and
+    reported **11 passed**: a green probe run is not evidence that the probe ran. Its replacement
+    raised a bare `ImportError`, which `importorskip` re-raises, so the suite still died at
+    collection — a *different* red for a *different* reason, and easy to misread as "the fix did not
+    work". Only `ModuleNotFoundError(msg, name="mlx")`, which is what CPython itself raises,
+    reproduces the runner. Lesson: the test of a test harness gets a negative control too.
+    With a blocker that works, the first measured rehearsal was **8 failed, 540 passed, 2 skipped**,
+    and the 8 split 5 + 3 in a way that turned out to be the whole decision: the 3 are
+    `tests/test_mlx_parity.py`'s own tests, which genuinely need the engine, and the **5 — 4 in
+    `tests/test_gates.py` and 1 in `tests/test_reproduce.py` — are all** `bench/reproduce.py --check`,
+    which prints
+    **26/30 rows hold** there with `! the module behind the command does not answer --help (rc=1):
+    ModuleNotFoundError` on four rows — `arch-params`, `mlx-int8`, `mlx-int8-keepgate`, `mlx-kernel`.
+    That is §9.43's runnability assertion doing its job on a machine that lacks the module — and the
+    inference drawn from it, "**so CI installs the extra**", was the claim CI then falsified.
+    Run 36776477857 got past the install step and printed, from the runner:
+    `ImportError: libmlx.so: cannot open shared object file: No such file or directory`.
+    PyPI's Linux `mlx` wheel ships the bindings and not the library (`mlx-metal` is marked
+    `sys_platform == 'darwin'`), so on Linux MLX is **installable and unloadable at once**, and
+    `pytest.importorskip` re-raises that bare `ImportError` instead of skipping — the same
+    second-failure shape the probe had already taught, now delivered by the real runner instead of a
+    rehearsal. Wheel filenames on a lockfile are not a measurement of `import`: the lock's
+    `cp313-cp313-manylinux_2_35_x86_64` entry was real, and what it proved about `import mlx.core`
+    on that runner was nothing. That is the whole argument for rehearsing a CI change on a branch —
+    the PR's run cost 28 s and returned a fact no local probe could have produced.
+    What the runner can therefore never have is MLX, so the gate had to learn to tell three things
+    apart instead of conflating them: **absent** (skip the file), **present but unloadable here**
+    (also skip — `tests/test_mlx_int8.py` and `test_mlx_parity.py` now wrap the import in
+    `try / except ImportError` + `pytest.skip(allow_module_level=True)`, measured both ways with the
+    two blockers, each printing `MLX unavailable on this box: …`), and **a module that exists here
+    and is broken** (red, always). The registry got the same distinction in
+    `bench/reproduce.py`: `mlx_unloadable_here(tail, platform)` forgives exactly two error strings
+    (`No module named 'mlx'`, `libmlx.so`) and only off Darwin, and the row then prints
+    `… cannot be imported on linux (MLX is Darwin-only at runtime), so its --help was not asked here`
+    as a note rather than a pass — `python -m bench.bench_mlx` failing to load on a Mac is still red,
+    and so is `No module named 'numpy'` anywhere. Five arms in `tests/test_reproduce.py` pin that
+    table, and §7.1 was paid against them: **4 mutants, 4 caught** (drop the Darwin guard → 2 fail;
+    broaden to any `ImportError` → 2 fail; unwire the note → 1; unwire the limit → 1), file restored
+    and byte-compared afterwards.
+    Three details worth keeping, because each was written wrong once inside this tick. (i) The CI
+    comment first said "two registry rows (`arch-params`, `mlx-kernel`)". It is four, and the way to
+    know is `grep -v '^ok'` on the check's own output, not a remembered number — §9.44's rule applies
+    to a comment in a workflow file exactly as it applies to a table. (ii) README's architecture line
+    "proven numerically identical, in float64, in CI" names
+    `tests/test_trunk_numerics.py`, which is torch-only at `atol=1e-8` and so never needed `mlx` —
+    the claim was never about the file that broke, yet it was still false, because on that runner
+    nothing ran at all. It becomes true for the first time with this commit, which is the reason the
+    fix went on a branch and through a PR before it touched `main`: the claim is only worth anything
+    once the Actions tab shows it, and §9.30 does not exempt a badge. (iii) README's Quickstart said
+    bare `uv sync` and `uv run pytest`, and the first draft of this tick "fixed" it by adding
+    `--extra mlx` — which off macOS installs a package that cannot be imported, i.e. it would have
+    handed the next contributor the same collection error through the documented recipe. The
+    corrected line is `uv sync` everywhere, `--extra mlx` on Apple silicon, and README says which
+    rows each choice leaves unread.
+    Counts, each measured on the tree it describes. The MLX-hidden rehearsal reads
+    **5 failed / 540 passed / 3 skipped**, and note what that rehearsal *cannot* show: on this box
+    `sys.platform` is `darwin` inside `bench/reproduce.py`, so the platform-note path never fires
+    however thoroughly `mlx` is hidden — the 5 failures (4 in `test_gates.py`, 1 in
+    `test_reproduce.py`, all `bench/reproduce.py --check` printing **26/30 rows hold**) are the
+    correct result here, and the Linux behaviour is reached only by the monkeypatched arms and, for
+    real, by the runner. That asymmetry is why the gate landed with tests that fake the platform
+    rather than with a rehearsal that could not have caught it. Against the final tree on this box:
+    **561 passed, 1 skipped**, 562 collected, in 283.78 s — the +5 being `test_reproduce.py`'s new
+    arms — with MLX loading and both MLX files running for real. (§3.4 carries the re-read: the same
+    split at 292.95 s on 2026-10-01, so the counts held across the 10c run and only the seconds moved.)
+    The general form: **a green local suite is a claim about one machine, and "the wheel exists" is a
+    claim about a filename. Where a check re-runs a published command it inherits that command's
+    optional dependencies, so it must be able to say *why* it could not ask: a dependency this
+    platform cannot load becomes a printed note, a dependency that went missing or a flag that went
+    away stays red, and no optional import sits at module scope unguarded in a test file.**
+
+52. **CI ran the suite for the first time and printed 13 red, and not one of them was findable
+    from this laptop.** Run 36779801999 (commit `1282457`) executed 519.31 s of tests on
+    `ubuntu-latest` and reported **13 failed, 520 passed, 20 skipped**. The collection defect is
+    dead: the 9 MLX tests skipped on their own, the four MLX registry rows printed the platform
+    note instead of failing §9.43, and `make secrets` was reached at all for the first time. That
+    is §9.51 working on the machine no rehearsal could reach — and it is also the moment the
+    sentence "the suite is green" got its second half, because the 13 are thirteen claims about
+    *this* box that a Linux clone falsified. They split four ways:
+    - **5 from one missing package.** `bench/quantize_int8.py` imports onnx at module scope, so its
+      `--help` could not be asked, which made the `int8-quantize` row red, which made gate G7's
+      proof ("every published row binds to a command that still answers") red, which failed
+      `test_reproduce.py::test_the_committed_tree_passes` and four `test_gates.py` arms. Fixed by
+      installing `--extra browser` in CI — and by README, because the documented contributor recipe
+      was `uv sync` + `uv run pytest`, i.e. the exact two lines that produce this red. That is
+      §9.51's third recurrence of the same shape: a check that re-runs a published command
+      inherits that command's dependencies, and the install text has to carry them.
+    - **5 from a fresh clone having no weights.** `runs/myna-v0/model.pt` is gitignored and travels
+      as a Release asset, so `bench/risk_coverage.py`, `bench/eval_needle.py` and the two
+      `test_latency_matched.py` runs died on `FileNotFoundError`. CI now downloads
+      `gh release download v0-checkpoint` before pytest, deliberately instead of skipping those
+      five: §5 P0's claim that the weights ship as a Release had never been executed by anything,
+      and a renamed or missing asset now fails one loud step rather than hiding behind five
+      legitimate-looking skips.
+    - **2 from the CLI-surface test meeting an unloadable MLX.** `test_cli_help.py` asserts every
+      bench script renders `--help`; `bench/bench_mlx.py` and `bench/diag_mlx_int8_gem.py` import
+      the engine at module scope, so off macOS there is no usage text to render. Same
+      absent/unloadable-vs-broken rule as §9.51, new file: a `macos_only` marker on exactly those
+      two params, with the other 22 rows of the table still required to answer anywhere.
+    - **1 from a test that read the laptop.** `test_explicit_device_never_rewritten` asserted
+      `resolve_device("mps") == "mps"`, which is "this machine has MPS" wearing a policy's clothes.
+      Availability is now monkeypatched for both accelerators, so the test reads the policy — an
+      explicit name comes back unchanged — on any box. Its neighbour already made MPS unavailable by
+      monkeypatch rather than "assumed either way", which is the argument for the shape.
+    The rehearsal that justified the last two was run *before* pushing, and it carried its own
+    negative control: a CPU-only simulation (`sys.platform = "linux"`, both `is_available()` probes
+    forced false) that **prints** the state it simulated and aborts if the patch did not take, then
+    reports **52 passed, 2 skipped** for those two files with the skip reason named. §9.51's probe
+    failed twice because a green probe is not evidence that the probe ran; this one prints its own
+    blocker. What the rehearsal still cannot reach is the Linux *install* — see below.
+    Labelled honestly, and then measured: onnx and onnxruntime being loadable on Linux was a
+    **projection**, made from the fact that Linux is onnxruntime's primary target rather than from a
+    wheel filename, and run 36781802262 is the measurement that closed it. **CI is green for the
+    first time in this repository's history**: that run printed **545 passed, 8 skipped, 1 warning
+    in 572.45 s**, exit 0, with `make secrets` reached and reporting **222 blobs scanned of 222 in
+    the db, 0 unreachable, 0 matches for 9 shapes** — a fresh clone's object database is a fifth the
+    size of this laptop's (222 vs 574), which is the denominator assertion doing its job rather than
+    a smaller scan. The `int8-quantize` row's `--help` was asked and answered on Linux, so the
+    projection's failure branch — `int8-quantize` joining the four MLX rows under a platform note —
+    did not fire, and the extra stays where a real dependency belongs.
+    The two boxes' reported totals differ by exactly 9 items (562 collected here, 553 reported there)
+    and the reason is the §9.51 design rather than a lost test: a module-level `pytest.skip` collapses
+    a whole file to **one** reported skip, so `test_mlx_int8.py` (8 tests) and `test_mlx_parity.py` (3)
+    become 2 skip lines on a box that cannot load MLX — eleven items in, two lines out, a net −9. That
+    collapse is the same shape the hidden-`mlx` rehearsal printed locally as `2 skipped`, so the gap
+    is arithmetic of the skip design and not a collection failure. The 8 skips the runner reported
+    are now named by the run itself, because CI moved to `pytest -q -rs` — a green that cannot say
+    *why* it skipped is how §9.51's sentence survived seven red runs:
+    `SKIPPED [1] test_mlx_int8.py:31` and `[1] test_mlx_parity.py:39` (both "MLX unavailable on this
+    box: No module named 'mlx'"), `SKIPPED [2] test_cli_help.py:60` (the two `macos_only` harnesses),
+    `SKIPPED [1]` at each of `test_report.py:330 / :480 / :526` ("the v1-rich … artifact is not on
+    disk"), and `SKIPPED [1] test_upstream.py:131` (needs `KEV_ROOT` plus `datasets`). Four of the
+    eight are this tick's design, three are external artifacts a clone cannot have, one is the KEV
+    gate that has always skipped here too — and that is the whole list, read off the log rather than
+    inferred, which is what makes 545 green mean 545 and not 545-plus-something-quiet.
+    The general form: **a clone is a different machine, and green is a claim about whichever one ran.
+    Fixing a defect that hid every test does not make the suite green; it lets the suite report the
+    thirteen things that were never tested anywhere but here.**
+53. **The weights §9.50 recorded as destroyed were sitting in a Downloads folder, and the fresh
+    control built to price one flag priced a +0.0446 improvement instead.** Two separate findings
+    landed in one morning on 2026-10-01, and the first one reverses §9.50 outright.
+
+    **(i) "Gone" was a statement about one directory, not about the artifact.** §9.50's whole entry
+    is that V1-B's `model.pt` lived under `/private/tmp/kgwork`, that the directory is ephemeral, and
+    that this was "the one irreversible risk" — and the check that closed it looked at
+    `/private/tmp` and reported the truth: nothing. What nobody checked was that the same bytes had
+    *also* been downloaded through the notebook's Output tab, because that is the ordinary way to get
+    a file off Kaggle and it lands in `~/Downloads`. `results (1).zip` (285 MB, dated 04:36) holds
+    `runs/v1b-kaggle-3600b/{model.pt,tokenizer.json,metrics.json,model_last.pt}`. So the risk was
+    already closed by an action taken for another reason, and the entry that warned about it stayed
+    true-as-written and false-as-current for hours. The general form: **before publishing that an
+    artifact is unrecoverable, enumerate every place a copy could be, not only the place it was made.**
+    A `find` over the directory that produced it is not a search for the artifact.
+
+    **(ii) Recovery was proved by three hashes, not by a filename.** Extracted to
+    `runs/v1b-kaggle-3600b/` (durable, inside the working tree, `*.pt` still gitignored), the files
+    are: `model.pt` 67,734,997 B at sha256 `0e73a8f07edc87d8…`, `tokenizer.json` 526,662 B at
+    `0252c24627eeebc2…`, `metrics.json` 295,060 B at `eb70f25bd775092b…`. The first two prefixes are
+    *already in the tree*: line 2 of the committed `runs/diag_question_ablation.log` reads
+    `model 0e73a8f07edc · tokenizer 0252c24627ee`, and that log is the witness for the 0.4893 macro
+    and the Tier 0 arm table. The third file `cmp`s byte-identical to the committed
+    `runs/v1b_kaggle_3600b.metrics.json`. Then `bench/diag_question_ablation.py` was re-run on the
+    recovered bytes (new witness `runs/v1b_recovered_tier0.json`): **guard green, 716 committed keys,
+    0 tie flips, macro 0.4893271976, and 0 field-level differences across all 16 cells** against the
+    committed JSON. A folder called `v1b-kaggle-3600b` is a claim; 716 reproduced keys are the fact.
+    Both assets are on the `v1b-checkpoint` Release, and the release was verified by downloading it
+    back and re-hashing (`gh release download` → same two digests), because §9.18's rule is that an
+    upload claim needs the round trip.
+
+    **(iii) The `off` control finished, and its number is not what the pair was built to look for.**
+    `antiprior_off_s0` reports **test macro 0.5339** (floor 0.4331, uniform 0.3321) over the 16 of 16
+    cells both harnesses score, against V1-B's 0.4893 — **+0.0446 with the flag off**. That is exactly
+    the confound §9.50 said the fresh control existed to remove: 0.4893 came off the code as it stood
+    before the data-loader work, so the difference belongs to the data path, not to `--anti-prior`.
+    G1 is still not met on this arm either — 0.70 target, and the "+0.15 over the floor" clause
+    observes **+0.1008** — and laya's 0.667 leaves the gap at −0.133. Three secondary readings, all
+    from the committed artifacts: the dose held its coverage (`paraphrase_draws` 207,411 over the 3,315
+    updates that ran = 62.57 per update, against V1-B's 225,547 over 3,600 = 62.65, a 0.1 % difference, so the
+    short arm is not a short sample of phrasings — §9.58 corrects this clause's first denominator, 3,314); the dev-mid series flattened rather than rising
+    (13 points from 0.3682 to 0.4332, OLS **+0.0231 per 1,000** over all of them, +0.0166 over the
+    last five, +0.0030 over the last three — V1-B's tail was +0.0072 and *still climbing*, §9.38, so
+    this arm is nearer its plateau than V1-B was to hers); and the wall price is
+    **6.719 s/update** over 0→3,300 (22,173 s stamped), 1.20× the T4's 5.618.
+
+    **(iv) It stopped at 3,314 of 3,600 because the laptop went to sleep, and the guard cannot tell
+    that from a memory spiral.** `pair_exit_codes.txt` records `train exit=1`; `metrics.json` records
+    `stopped = "step time 596.40s > 3.0x median 6.58s of the last 20"`. The guard is working as
+    designed — and what it detected was `pmset -g log` showing back-to-back 'Maintenance Sleep'
+    entries on battery at 08:08:17 (244 s), 08:12:40 (222 s), 08:16:41 (194 s) and 08:20:03 (133 s),
+    with the run ending at 08:22:17. `src/myna/train.py` stamps updates with `time.time()`, which
+    advances while the process is frozen, so a nap is indistinguishable from allocator paging. The
+    compute itself was healthy to the last step: across all 56 stamped intervals the median is
+    6.633 s/update and the maximum 7.267. **Open defect, deliberately not fixed in this tick:** the
+    monotonic clock is the right instrument (`mach_absolute_time` stops across sleep on this box), but
+    changing the trainer mid-pair would mean the two arms ran different code, which is the one thing
+    the pair exists to avoid. Also note the guard is inert for its first 20 updates
+    (`len(step_times) >= window + 1`), which is the only reason the `on` arm survived an 86-minute
+    nap inside its first 60 updates.
+
+    **(v) Two premises in the handover were checked against the artifacts and one of them is wrong.**
+    The instruction to "adapt `--free-gib 9.0` for the T4's 16 GB" would have changed the dose: the
+    recovered V1-B `metrics.json` records `mem_plan_free_gib = 9.0` **from the Tesla T4 run itself**
+    (`device: Tesla T4`, `free 14806 MiB of 14911 MiB`), so 9.0 is not a Mac value at all — it is the
+    pin both boxes already share, chosen so the memory plan clamps to batch 10 everywhere. It stays.
+    The other premise, that the Kaggle launcher scripts had been deleted, is half wrong:
+    `kaggle/run.py`, `kaggle/campaign.py` and `kaggle/package_dataset.py` are all present and
+    `campaign.py` still writes a pushable kernel; what is gone is the notebook directory, so the new
+    `kaggle/notebooks/antiprior-on-t4/` is hand-built on the same rule — every arm through
+    `kaggle/run.py`, and its `--dry-run` printed into cell 7 so the command that ran is in the output.
+    Verified against the Mac arm's own log: the two commands differ in `--device` and the output path
+    and in nothing else.
+
+    **(vi) The Mac lane is stopped; the T4 lane is blocked on the account, and the first cause named
+    here for that block was a guess that measurement then killed.** The `on` arm was killed at step
+    540 by exact PID (dev-mid 0.3789 at 500; its log is committed as
+    `runs/antiprior_on_s0.train.log` so the abandoned leg is a record rather than a silence), then the
+    driver and the backup watcher exited with it. The fresh token authenticates — `kaggle kernels list
+    --mine` answers, account `anonymous124` — and the kernel pushes and runs, but every session comes
+    back CPU-only: `torch 2.10.0+cpu`, `cuda build None`, `device_count 0`, no `nvidia-smi` binary,
+    no `/dev/nvidia*`, `ACCELERATOR_TYPE None`. What is *not* the cause, each measured rather than
+    assumed:
+    - **Not the metadata.** `kaggle kernels pull -m` on the pushed kernel returns the *server's* record
+      with `"enable_gpu": true` and `"machine_shape": "NvidiaTeslaT4"` in it. The field arrives and is
+      stored; nothing is silently dropped between the laptop and Kaggle.
+    - **Not the CLI's request shape.** Five variants, each its own completed run, all CPU: metadata
+      `NvidiaTeslaT4`; metadata `NvidiaL4`; `--accelerator NvidiaTeslaT4`; `--accelerator
+      NVIDIA_TESLA_T4_X_2` (the value the September run used); and `docker_image_pinning_type:
+      "latest"` with `docker_image` removed, which is Kaggle's documented fix for a pinned image
+      overriding an accelerator request (kaggle-cli #1197, maintainer reply 2026-09-17). Per #1196
+      `NvidiaTeslaT4` *is* the identifier for the editor's "GPU T4 ×2", so the value asked for was
+      never wrong.
+    - **Not the quota.** `kaggle quota` prints `GPU 0.00h used 30.00h remaining, refreshAt
+      2026-10-03` — thirty hours unused. So the sentence I first wrote here, that this "means the
+      account has no GPU entitlement until phone verification", is unsupported: a quota row is a
+      budget, not a provisioning decision, and nothing I can run from this box reaches the gate.
+      **The gate itself stays OPEN** — something between the stored `enable_gpu: true` and session
+      scheduling denies `anonymous124` hardware, and the CLI has no verb that reads it.
+
+    The comparison that does locate it is the same recipe on the other account.
+    `runs/v1b_kaggle_3600b.train.log:120–121`, pushed by `kaggle kernels push` for
+    `anonymouskumaranonymous01`, prints `device: Tesla T4` and `free 14806 MiB of 14911 MiB` — a real T4
+    with 14.5 GiB free — and trained 3,600 updates on it. Same CLI 2.2.4, same
+    `kernel-metadata.json` shape that `kaggle/campaign.py:249–256` writes, same `--accelerator` route,
+    same repo. The failure is specific to `anonymous124`, and both closes are the user's, not mine:
+    **look at the Accelerator dropdown in the notebook editor for `anonymous124`** (a greyed-out T4 is
+    the witness, and it is only visible in a browser), or **re-mint a token for
+    `anonymouskumaranonymous01`**, whose GPU path is already committed as a log line.
+
+    Cell 1 of the real notebook still refuses to train on CPU rather than run ~10× longer and print
+    numbers that look identical, and that guard was proved by firing it: kernel version 2 ends in
+    ERROR with exactly its message. **Its message now states the measured denial and the two closes
+    instead of the phone-verification guess**, and firing it again is how version 3 of
+    `https://www.kaggle.com/code/anonymous124/antiprior-on-t4` ends — that URL is the launch handle for
+    Task 4's arm, and the version-3 log prints `torch 2.10.0+cpu | cuda build None | device_count 0`
+    above the refusal, so the CPU denial is recorded in the same artifact as the guard that catches it.
+    Training resumes the moment a session holds a T4. Kernel **version 4** is what a browser
+    "Save & Run All" would then execute, and it hardens the one cell that stands between the clone and
+    5.6 hours: cell 3 used to `grep -n -B1 "def ask"` and *show* the decorator, which is how a silent
+    miss survives to the end of a run — it now raises `THE CLONED TREE LACKS THE ask() FIX` when no
+    `@torch.no_grad()` sits above `def ask(`. That guard was mutation-checked before it was pushed: on
+    the real `src/myna/engine.py` the regex resolves with the group set, and on a copy with the
+    decorator line deleted it resolves empty, so the assert has one passing and one failing arm on
+    this box rather than only the happy path. (Version 4 itself still ends in ERROR at cell 1 — the
+    CPU guard — so the new assert has not yet run on Kaggle, and cannot until the gate in this
+    paragraph opens.)
+
+    **(vii) The pair's judging bar has to move, and the move is stated before the result.** The plan
+    was `off` vs `on` on one machine at one dose. What exists is `off` on an M5 at 3,314 updates and,
+    when it runs, `on` on a T4 at 3,600 — so that pair prices the flag *and* the machine *and* the
+    dose, which is the exact shape §9.50 rejected. Two consequences, both cheap to state now: the
+    verdict stays on Tier 0's **emitter count over the 16 cells** (how many cells stop answering a
+    constant label), not on the macro, because the emitter count is a property of the batching rule
+    rather than of the box; and if the macro is quoted at all it is quoted as provisional until the
+    `off` arm is re-run on the T4 — 5.6 h of the 30 h/week quota, which is the user's call to spend,
+    not a step to take quietly.
+
+54. **A Release title claimed a dose the run never did, and closing it took a hash round trip plus a
+    registry row that refuses to overwrite its own witness.**
+
+    **(i) The off control's weights are on a Release, proved the only way that means anything.**
+    `runs/antiprior_off_s0/model.pt` (67,733,781 B) hashes to
+    `30f0fa937e57e8ce8b21c58315dc7e800151a0c95e003dc0930e0f75d588f1e5`, which is the digest
+    `antiprior_off_s0-weights`'s own body already printed, and `gh release download` +
+    `shasum -a 256` returns that digest at that byte count, plus `tokenizer.json` at 526,662 B /
+    `0252c24627ee…` — the same tokenizer digest as V1-B, which is what a shared vocab should do. So §5
+    P10 10c's "its weights are on the release" is now a witnessed sentence rather than the shape of
+    sentence §9.50 wrote before it had to be retracted.
+
+    **(ii) What was wrong was the label, and a label is where a stranger reads.** Both the release
+    name and its first line said `3,600 updates`. `runs/antiprior_off_s0.metrics.json` says
+    `last_step: 3314` beside `steps_requested: 3600`, and `myna.report` prints the VOID line over those
+    bytes — so the title wore the request as if it were the achieved dose, the exact category §9.53(iv)
+    is about, in the one place with no surrounding prose to correct it. The tag now reads *"antiprior_off_s0
+    weights (3,314 of 3,600 updates — the off control, stopped by its own sleep guard)"*, and the body
+    carries the 596.40 s-against-6.58 s guard reading, the three digests, and the curl-and-re-hash
+    commands a fresh clone needs. No bytes were re-uploaded: the assets are untouched, which is why the
+    hashes above still match after the edit.
+
+    **(iii) `antiprior-off-macro` is the 31st row, and it was verified without letting it eat its own
+    receipt.** The row's command ends `--out runs/antiprior_off_s0.report.json`, so running it as
+    written would rewrite the file `--check` compares against — a registry whose proof overwrites its
+    witness can only ever report itself green. The re-run therefore printed to a scratch path and the
+    *comparison* became the artifact: `runs/antiprior_off_s0.report_repro.log` prints
+    **372 leaves compared, 2 differing — `/cmd` and `/metrics_file`** — with `g1` equal, all 16 cells
+    equal, and `macro_acc 0.5338735348381732` on both sides. Those two leaves are provenance, not
+    measurement: the committed report was computed while the arm's directory still existed, and the row
+    names the flattened `runs/antiprior_off_s0.metrics.json`. A row that reprints the number and moves
+    the provenance is a row that reproduced it.
+
+    **(iv) The counts moved because the registry said so, not because prose did.** `make repro` went
+    **30/31 → FAIL** on the new row (`no doc quotes the command`), which is §9.30's rule biting on the
+    author rather than on a stranger: the command had to be printed in the prose next to the published
+    figure, inside SPEC §5 P10 10c, before the row could hold — README's generated block was not
+    accepted as the quote, and `doc_text()` cuts that block out precisely so the registry cannot check
+    itself. Then `make gates` named the three live numbers the G7 cell owed it (**31 registry rows, 80
+    quoted figures, 21 rows re-run on this box**), and `tests/test_reproduce.py`'s coverage assertion
+    went red at 24 checked commands. All four are now consistent: `make repro` prints
+    **31/31 rows hold; 80 figures tied to a committed witness**, `make gates` prints **6/7 verdicts
+    hold — 3 of 7 met, 3 not met, 1 open**, so the release gate is still not clear for the reasons
+    §9.53 records rather than for a stale count. The suite is **561 passed / 1 skipped in 261.60 s**
+    (562 collected), and CI was green on `38ad176` at run 36821510754 before this tick's edits.
+
+    **(v) The new coverage number was mutation-checked, and the mutation that matters is a shape, not a
+    typo.** Rewriting the row's command as `grep -o macro_acc …` drops the checked-command count
+    24 → 23 and the assertion fires; stripping the `uv run` prefix leaves it at 24, because
+    `python_target` resolves `python -m myna.report` just as happily. So the guard bites when a python
+    row quietly degrades into something the `--help` question cannot be asked of — the failure §9.43
+    exists to catch — and does not bite on formatting.
+
+55. **The stopped `on` arm turned out to be evidence, the `off` control turned out to be a weaker
+    reader than V1-B, and one of this section's own guards turned out to be false.**
+
+    **(i) The pair was audited where it actually ran.** `tests/test_kaggle_bundle.py` has long
+    asserted that the two *generated* Kaggle cells are identical but for one flag value, which says
+    nothing about the two commands this box executed. Reading the launcher records —
+    `runs/antiprior_off_s0/run.json` and `runs/antiprior_on_s0/run.json`, each a 20-token flag list —
+    gives the executed audit: **18 flags compare equal, and the only differences are `--out` and
+    `--anti-prior`**. Both carry `--suite data/decision-v2-pilot --device mps --config v0 --steps
+    3600 --seed 0 --batch 10 --accum-groups 8 --max-q-cells 2048 --group-sample pool
+    --eval-every 250 --save-every 250 --mem-safety 0.6
+    --stop-factor 3.0 --vocab 8192 --score-loss ce --paraphrase on --row-batch --free-gib 9.0`. That
+    makes this the only comparison in the whole 10c lane with no machine, no seed and no
+    code-drift confound in it, and it is the reason (ii) and (iii) are worth reading as pair results.
+
+    **(ii) The `on` arm reached 540 stamped updates before the lane was shut down by hand, and that
+    is not nothing.** Its two evals sit at matched dose against the control: dev-mid 250 = off
+    **0.3682** / on **0.3592**, dev-mid 500 = off **0.3962** / on **0.3789**. Both differences are
+    negative — the direction the anti-prior scenario predicted, since the six cells the rule flattens
+    are the six myna scores best — and both are *smaller than the control's own swing between
+    adjacent evals* (its next reading is 0.3638, i.e. −0.0324 from the 500 point). **So the flag is
+    not resolvable at 540 updates**, and the honest output of the partial is a bound, not a verdict:
+    nothing here says `on` helps, and nothing here says it hurts by more than the noise floor.
+    What the same 540 steps do settle is the wall price, because two arms on one box can be timed
+    interval by interval. The `on` arm's first interval (0→60) costs **89.55 s/update**, which is
+    data warm-up and not the flag — the control's identical first interval costs 6.75 — and its
+    remaining eight intervals run **6.63–7.65 s/update** against the control's **6.43–7.27** over the
+    same windows. `--anti-prior` buys no wall, so 10c's ~11.2 GPU-hour price needed no correction.
+    One labelling trap worth writing down, because it is the class that ate V1-B: the
+    `antiprior_on_s0-wip` Release asset (deleted 2026-10-05) and this box's `runs/antiprior_on_s0/model_last.pt` are both
+    **203,229,625 bytes** and are **not the same weights** — the asset hashes to
+    `8ed38b240bd843bf…` (downloaded back and re-hashed to prove it) and is the ≤step-250 save its body
+    dates at 10:21:55, while the local file hashes to `3b45dd6a4ae65e77…` and is the step-500 save.
+    `--save-every 250` overwrites a fixed-size file, so a byte count identifies a format, never a
+    step. The step-500 weights exist only on this laptop and only under a gitignored path: that is an
+    open durability gap, deliberately left open rather than closed by a public upload nobody asked
+    for, because those weights cannot answer the 3,600-update question anyway.
+
+    **(iii) Tier 0 over the control's own weights says the +0.0445 came with less selectivity.**
+    `bench/diag_question_ablation.py --run-dir runs/antiprior_off_s0` prints its blocker before its
+    numbers — `VOID: this run STOPPED at step 3314 of 3600 requested … No claim may be read from
+    them` — so the six arms describe truncated bytes; what makes them useful is that the as-scored arm
+    reproduces **716/716 keys** of `runs/antiprior_off_s0.report.json` with 0 tie flips, which binds
+    every arm to the published 0.5339 instead to a fresh number. Against the committed V1-B witness:
+
+    | arm | V1-B (T4, 3,600, off) | control (M5, 3,314, off) | Δ |
+    |---|---|---|---|
+    | as-scored | 0.4893 | **0.5339** | +0.0445 |
+    | blank-instruction | 0.3341 | **0.4315** | +0.0974 |
+    | blank-options | 0.2669 | **0.3674** | +0.1005 |
+    | permute-instruction | 0.4927 | 0.5367 | +0.0440 |
+    | cross-source-instruction | 0.4364 | 0.4902 | +0.0537 |
+    | swap-state | 0.4173 | **0.4076** | −0.0097 |
+
+    Every arm rises but one, and the *worst*-prompt arms rise furthest, so the differences between
+    arms — the selectivity — shrink: instruction reliance 0.155255 → **0.102365**, option reliance
+    0.222473 → **0.166500**. The one selectivity that grows is the state: swapping a row's state for
+    another row's from the same source costs 0.072038 → **0.126311**, and the cells that move at all
+    go **8 → 10** (`contrastive/decision`, `mnli/relation`, `sst5/sentiment` join; `agnews/is_business`
+    leaves). The mechanism reading is therefore not "more data made it read the cue better" — it is
+    *better-remembered priors plus a firmer state lookup*, and the three noul cells that had already
+    collapsed are joined by a fourth: `grep -c '"collapse_share": 1.0'` is **3** in V1-B's witness and
+    **4** here, because `agnews/is_business` now answers label 0 on **43/43** rows and lands exactly on
+    its own 0.698 floor — that is the whole of its apparent gain, 0.6512 → 0.6977, purchased by
+    emitting a constant. Row `tier0-off-control` binds all of it to the two committed files.
+
+    **(iv) The guard 10c had been leaning on is false, and saying so is cheaper than being caught
+    with it.** The bullet reads: "the verdict stays on Tier 0's emitter count over the 16 cells — *a
+    property of the batching rule, not of the box*." The second half is contradicted by (iii): V1-B
+    and the control share `--anti-prior off` and differ only in box and dose, and their emitter counts
+    are 3 and 4. **The emitter count is not box- or dose-invariant**, so it was never a confound-free
+    yardstick; it is only a verdict against a baseline taken on the same box at the same dose. That
+    is now exactly what (iii) supplies, which is the useful consequence: the `on` arm will be judged
+    against **4 emitters on the M5**, not against 3 on the T4. SPEC §5 P10 10c carries the corrected
+    sentence.
+
+    **(v) What the machinery printed after the row was added.** `make repro` went **30/31 → FAIL**
+    (`witness not committed` for both new files) and, after staging, **32/32 rows hold; 88 figures
+    tied to a committed witness**; `make gates` demanded the three live G7 numbers (**32 registry
+    rows, 88 quoted figures, 5 retrain a checkpoint**) and now prints **7/7 verdicts hold — 3 of 7
+    met, 3 not met, 1 open**, so the release gate is still not clear. The coverage assertion in
+    `tests/test_reproduce.py` moved 24 → 25 checked commands and was mutation-checked the same way as
+    §9.54(v): rewriting the new row's command as `grep -o collapse_share …` drops it to 24 and the
+    assertion fires, and the row is a python command whether or not a fresh clone can run it. The
+    suite is **561 passed / 1 skipped in 293.44 s** (562 collected) — the identical split §9.54
+    printed at 261.60 s, since this tick edited one test's counts and added no test, so the seconds
+    are the only thing that moved. Before
+    these edits, CI answered for both pushed SHAs of the last tick: run **36822216666** at `8c346a7`
+    and run **36823676017** at `0e77d72` each printed **545 passed, 8 skipped** (12m38s–13m17s) with
+    the credential scan at **0 matches for 9 shapes across 230 blobs**. This tick's own tree is
+    covered by run **36826569290** at `d2e0dc9`, the tip: **545 passed, 8 skipped in 582.78 s**, scan
+    **0 matches for 9 shapes across 232 blobs** — the same 545/8 split again, which is the expected
+    signature of a tick that adds one registry row and edits one test's counts without adding tests.
+    The intervening `4eca685` run was still `in_progress` when the tip's result was read, so the tip's
+    green is the witness for the tree §9.55 ships in, not for that SHA. §9.52's arithmetic still
+    closes on the pair of boxes (562 collected here − 11 items in the two MLX modules + the 2
+    module-level skip lines they collapse to = 553 there), and adding a registry row added no
+    collected test, which is why both runs print the same 545.
+
+    **(vi) "+0.0446" was the difference of two rounded macros.** §5 P10 10c and §9.53 both printed
+    the control's gain over V1-B as +0.0446, which is 0.5339 − 0.4893 — the subtraction of the two
+    figures *after* each had been rounded to four places. From the committed witnesses the values are
+    0.5338735348381732 and 0.4893271976084137, so the gap is **0.0445463372297595**, i.e.
+    **+0.0445**. The live prose now prints +0.0445 with the exact value beside it; the dated entries
+    keep what they said, which is what makes this one findable.
+
+    **(vii) The checkpoint inventory, because "the last irreversible risk" was never one risk.** An
+    audit of which rows read weights, against which Releases carry them, leaves exactly one gap and
+    one soft one. Covered: `myna-v0` → `v0-checkpoint` (the 7 `here` rows that read it),
+    `v1b-kaggle-3600b` → `v1b-checkpoint`, `antiprior_off_s0` → `antiprior_off_s0-weights`
+    (§9.54(i)), and the `on` arm's ≤step-250 snapshot → `antiprior_on_s0-wip` (deleted 2026-10-05). **Not covered:**
+    `runs/myna-v1-rich/` — `model.pt` 67,733,781 B and `metrics.json`, both matched by
+    `.gitignore:24`'s `runs/*` rule — is the only input set behind a *quoted* published figure that no
+    Release carries, and row `void-vs-laya` is status `here`, i.e. counted in the G7 cell's "21 rows
+    re-run on this box". It is honestly labelled (the row's own note says the artifact is committed
+    and the metrics file behind it is not, and §5 P1 calls the figure void as evidence because the
+    checkpoint predates the `385e06c` batching fix), so nothing over-claims; the exposure is only that
+    a disclosure number — 0.338 against a 0.346 control — becomes unreproducible with the laptop.
+    Softly uncovered: `runs/antiprior_on_s0/model_last.pt` (the step-500 save, §9.55(ii)) and
+    `runs/myna-v1/model_last.pt`, `runs/myna-v0-rlcd/`, `runs/v1-smoke/` — none of which backs a
+    quoted figure except `rlcd`, whose row is `retrain` and therefore claims no local re-run.
+    **Priced, not decided:** shipping `myna-v1-rich` is one 65 MB Release upload, roughly the size of
+    `antiprior_off_s0-weights`, and it would make every quoted figure in the repository
+    download-reproducible; it is left as the user's call because the figure it protects is explicitly
+    void-as-evidence, and because publishing an artifact is shared state (§9.53's rule that a Release
+    is the user's to open, not the agent's).
+
+56. **The `on` arm came home to this Mac, and dose-matching it turned out to be a question about
+    which index the loop stops on and which schedule the snapshot carries.** The owner's decision at
+    2026-10-01 12:52 NPT: *"run the on arm on the Mac, not Kaggle. Continue it to 3,314 updates
+    (dose-matched to the off control), one run at a time, keep the Mac from sleeping for the whole
+    run, then download + Release the weights immediately and eval macro vs the control's 0.5339."*
+    That closes the Kaggle lane for 10c (the kernel and its five CPU-only measurements stay in §9.53(vi)
+    as the record of why the account cannot run it) and it makes this entry a launch note, so every
+    number below is either stamped by the run or labelled projected.
+
+    **(i) The canonical launcher already knew how to do this, which is why nothing was hand-typed.**
+    `kaggle/run.py`'s `continuation()` returns `["--resume"]` when `out/model_last.pt` exists, and
+    refuses — naming `--warm-start` and a longer `--steps` as the two things that are not a resume —
+    when `metrics.json` says the schedule is already spent. §5 P9 9e measured that refusal's failure:
+    resuming a finished run restores a spent scheduler and trains at lr ~0 while printing numbers that
+    read as drift. Here the snapshot is at step 500 and the target is 3,314, so the resume is *before*
+    the decay ends and the branch is the right one. The expanded command, printed by `--dry-run` before
+    anything was launched and then by the run itself:
+
+    ```bash
+    uv run python kaggle/run.py --corpus data/decision-v2-pilot --out-root runs --device mps \
+        --config v0 --steps 3315 --batch 10 --seed 0 --score-loss ce --stop-factor 3.0 \
+        --save-every 250 --free-gib 9.0 --name antiprior_on_s0c --anti-prior on
+    ```
+
+    which is `myna.train` with 21 flags, i.e. the `off` control's 20 plus `--resume`. A fresh `--name`
+    was required twice over: `build_command` raises on `--warm-start` with a snapshot present, and
+    `runs/antiprior_on_s0/` is the directory §9.55(i) and §9.55(ii) make claims about. Writing into it
+    would have replaced the `run.json` whose 20 flags that audit counts, and would have overwritten the
+    step-500 `model_last.pt` whose digest `3b45dd6a4ae65e77…` that entry quotes. So `runs/antiprior_on_s0c/`
+    holds a *copy* of the seed, and both directories survive: `shasum -a 256` returns the same
+    `3b45dd6a4ae65e77c7f9cbfa800ccb185637da4d57c3863c84644a800e700917` for `203,229,625 B` on both
+    sides of the copy, which is the round trip that says the resumed weights are the weights the
+    partial trained.
+
+    **(ii) Dose-matching is `--steps 3315`, not `3314`, because the loop's last executed index is
+    `args.steps − 1`.** `train.py:1000` reads `for step in range(start_step, args.steps)` and
+    `train.py:1032` stamps `last_step = step` inside it, while the control's committed
+    `runs/antiprior_off_s0.metrics.json` records `last_step: 3314` under `steps_requested: 3600` — so
+    the control *executed* index 3314. Requesting 3,314 here would have stopped the arm one update
+    early, at index 3,313, and broken the comparison with the literal the registry already binds
+    (`antiprior-off-macro` quotes `"last_step": 3314`). One consequence of changing the request is not
+    cosmetic: `log_every = max(1, min(200, args.steps // 60))` (`train.py:924`) makes the *print
+    cadence* a function of the requested dose, so the control stamped every 60 updates and this run
+    stamps every 55 — visible as the first line arriving at `step 550` where the partial's stopped at
+    `step 540`. The *eval* grid did not move, and that is the one that matters for the comparison:
+    `--eval-every 250` still fires at 750, 1,000 … 3,250 (11 points), which with the partial's 250 and
+    500 is the control's 13 dev-mid readings on the same steps.
+
+    **(iii) The scheduler is the part that could have quietly ruined the arm, and it was read out of
+    the file rather than inferred.** `--warm-start` would have loaded those weights onto a fresh cosine
+    fitted to 3,315 updates — a third learning-rate curve beside the control's. `--resume` restores the
+    saved one, and `torch.load` on the seed prints `step 500`, `T_max 3600`, `last_epoch 501`,
+    `lr 5.717815913939212e-4`, `eta_min 0.0`. So the continuation walks the control's own 3,600-step
+    annealing curve and stops at index 3,314 on it, which is precisely where the control stopped
+    (about 1.5 % of the 6e-4 base lr, low but not the ~0 that §9e's failure mode is).
+
+    **(iv) The flag audit, run on the three commands rather than asserted.** As parsed flag-by-flag:
+    `off` 20, `on` partial 20, continuation 21. Against the partial, the continuation differs in
+    `--out`, `--steps` and `--resume`. Against the `off` control it differs in `--anti-prior` (the
+    variable), `--out` (a directory cannot be shared), `--steps 3600 → 3315` and the presence of
+    `--resume`. Every other flag compares equal, including the four that move the numbers: `--batch 10`,
+    `--seed 0`, `--score-loss ce`, `--stop-factor 3.0`, `--save-every/--eval-every 250`, `--accum-groups 8`,
+    `--max-q-cells 2048`, `--mem-safety 0.6`, `--vocab 8192`, `--free-gib 9.0`, `--row-batch`,
+    `--paraphrase on`, `--group-sample pool`. Two lines of the new run's own output are the witness that
+    the regime really is shared, not merely the argv: `memory plan: batch 10 fits 9.0 GiB free x 0.6,
+    less 3.2 GiB of question branch at p95 267 tokens (needs 5.3 GiB)` — byte-identical to the
+    control's, which is what the `--free-gib` pin is for (§9.53(v)) — and `anti-prior: mini-batches
+    drawn by inverse label prior; 6 of 16 cells carry a majority label at or above 0.55`, identical to
+    the partial's. The resume line the trainer stamped is `resume: runs/antiprior_on_s0c/model_last.pt
+    at step 500 -> continuing at 501 of 3315; data RNG re-seeded from --seed 0, so this is a
+    continuation, not a bit-identical replay` — that re-seed is the honest residue in the pair and
+    §5 P10 10c now names it instead of claiming a clean two-flag pair.
+
+    **(v) Sleep, thermals and the one-run-at-a-time rule were checked before the launch, not after.**
+    `pmset -g batt`: 'Now drawing from AC Power', 74 % charging on a 70 W Apple adapter — which is what
+    makes `caffeinate -s` mean anything, since that assertion does not hold on battery. `pgrep -fl
+    myna.train` before launch: no matches, so nothing was already training. `caffeinate -i -s -w 80297`
+    is PID 80330 and `pmset -g assertions` confirms both halves with "caffeinate asserting on behalf of
+    Process ID 80297": `PreventUserIdleSystemSleep` and `PreventSystemSleep`. The driver is 80297, the
+    trainer 80299, and the pre-existing unrelated `caffeinate` and Chrome were left exactly as found.
+    This is not belt-and-braces: the `off` control's own death was `step time 596.40s > 3.0x median
+    6.58s of the last 20`, which §9.53(iv) attributes to battery 'Maintenance Sleep' rather than to
+    anything the model does. The corollary is a size rule rather than a prohibition: nothing on the
+    order of the 293 s suite, a mutation battery or a Tier 0 re-run may run while an arm is live,
+    because that is the shape that trips the guard and truncates the dose. One exception was taken
+    deliberately and is recorded here — `uv run pytest tests/test_reproduce.py tests/test_gates.py`
+    (**67 passed in 26.07 s**) to prove the `.gitignore` edit broke nothing — and the interval that
+    contains it still printed at 6.58 s/update, so the guard did not bite.
+    Wall clock, measured rather than hoped: the first 50 resumed updates stamped **355 s = 7.10 s/update**
+    and the next 55 stamped **362 s = 6.58 s/update** — the second number is the `off` control's own
+    median step time to the hundredth (`3.0x median 6.58s` is the line that ended that run), and there is
+    no repeat of the 89.55 s/update first interval because AdamW's state came back with the snapshot
+    instead of warming up. At 6.58 s/update the remaining 2,709 updates from step 605 are **4.95 h
+    (projected)**, plus eleven dev-mid evals at the ~37 s the control's intervals imply, so the projected
+    finish is ≈ 18:10 NPT.
+
+    **(vi) The weights ship without anyone awake, and the tag says the step the run reached.**
+    `runs/ckpt_backup_on_s0c.sh` (PID 80600) does two uploads and neither is what
+    `runs/ckpt_backup.sh` would have done with these paths: it ships the first snapshot *this* run
+    writes — identified by a digest different from the `3b45dd6a…` seed, because uploading the seed
+    would insure nothing (it is byte-identical to a file already in the working tree) — and then the
+    final `model.pt` + `tokenizer.json` once `stable()` sees the size stop moving. Its titles take the
+    step from `metrics.json`'s `last_step`, never from the requested dose, which is the §9.54 defect
+    this script exists to not repeat. Its log and state file are gitignored alongside
+    `runs/pair_driver.log`, because line 2 of the log is the expanded command and its first token is
+    this laptop's absolute interpreter path.
+
+    **(vii) What this run is judged against, fixed before it finishes.** Test macro against the
+    control's committed **0.5338735348381732** (not V1-B's 0.4893, which is a different code path and a
+    different box); Tier 0's constant-emitter count against the **4** the same harness printed for this
+    control on this box at this step, so 5 or more means the batching rule bought the mechanism nothing
+    and 3 or fewer means it moved as designed; `cells that move at all` against 10; and the dev-mid
+    trace on the control's 13 points. The pre-registered direction from the scenario work is **flat to
+    down** (0.42–0.49), because `--anti-prior` re-weights the six cells myna already scores best in — so
+    a rise here is a finding about a continued 500-update partial not being the same object as a fresh
+    3,600-request run, and it will be written that way. *(OPEN: every figure in this bullet is gated
+    until the run stamps its last step; the only measured numbers in this entry are the ones above.)*
+
+    **(viii) The judgement runs itself, and the trigger is a file only the end block writes rather
+    than a wall-clock guess.** `runs/post_on_s0c.sh` waits for the trainer's PID to disappear *and*
+    `runs/antiprior_on_s0c/model.pt` to exist, then flattens
+    `runs/antiprior_on_s0c.{metrics,train.log}`, reports the macro against the committed laya witness,
+    and re-runs Tier 0 over the new weights. Every path it writes is a new `runs/` file; no committed
+    witness is in its way. If the trainer disappears with no `model.pt`, the chain logs that it
+    died before its end block and exits 1 rather than reporting a half-run. Its own progress log and
+    marker are gitignored beside the uploader's, because they are box glue; the five files it produces
+    are the witnesses a registry row will bind — **that row is not written yet, because a row quotes
+    figures and these do not exist until the run stamps.**
+
+    **(viii-b) The trigger's first choice was wrong, and the check that killed it was `ls`.** As
+    originally written the chain waited on `tokenizer.json`, reasoning that `train.py` writes
+    `metrics.json`, then `model.pt`, then `tokenizer.json` (`:1105`, `:1121`, `:1123`), so the last of
+    the three says the end block *completed*. It does not: `save_snapshot()` saves the tokenizer
+    alongside the weights at **every** rolling save (`:405`, called from `:1041`, `:1045`, `:1056`), so
+    `runs/antiprior_on_s0c/tokenizer.json` has existed since step 249 — and did, at 526,662 B, spotted
+    mid-run at 16:36 while `model.pt` was absent. The practical damage was the *negative* branch: the
+    "trainer gone with no tokenizer" case could never fire on a run that reached its first save, so a
+    crash at step 3,000 would have sent the chain on to `cp` a `metrics.json` that does not exist and
+    then print a report error instead of one honest `train-died` line. `model.pt` is the only path the
+    end block writes that no rolling save touches, and it is written *after* `metrics.json` is fully
+    flushed, so its presence also certifies the file the chain reads next. The chain was relaunched on
+    the new marker (PID 11305, after `bash -n` and a kill of 82187 by exact PID — a bash script being
+    edited while bash is still reading it is why restarting it is not optional).
+
+    **(ix) The run completed at the requested dose, and the pre-registered rule scores as follows.**
+    `metrics.json` stamps `"last_step": 3314`, `"steps_requested": 3315`, `"stopped": null` — §9.56(ii)'s
+    index arithmetic held, so the arms really do execute the same 3,315 updates and the comparison is the
+    repo's first dose-matched pair on one box. Against the baselines fixed *before* the run in §9.56(vii),
+    verbatim and without renegotiation:
+
+    | the rule said | the run printed | |
+    |---|---|---|
+    | macro vs **0.5338735348381732** | **0.4784612299508689** | −0.0554123048873043 |
+    | emitters vs **4** | **0** | moved as designed |
+    | movers vs **10** | **15** of 16 | moved as designed |
+    | 13 dev points | 13 (250…3,250) | grid held |
+    | predicted **flat to down, 0.42–0.49** | 0.4785 | inside the band |
+
+    The dev-mid trace agreed with the scenario early and stayed there: eight of its ten first points are
+    below the control's matching step, and the two worst (−0.0421 at 2,000, −0.0397 at 2,250) exceed any
+    single adjacent-eval swing in the control's own series (0.0324), which is what made "not resolvable at
+    540 updates" (§9.55) the right sentence *then* and a resolvable negative the right sentence now. The
+    scenario file's headline estimate was *"flat to down — 0.42–0.49, worst credible 0.356, best credible
+    0.539"*; the measurement landed in the band, and its best credible case (every treated cell reading
+    and hitting laya per-cell, +0.049) is the one the run rules out.
+
+    **(x) A residue the completed run exposes that the 540-update partial could not: the arms are not
+    coverage-matched.** *[Withdrawn by §9.58, which also corrects this bracket's first draft: the two
+    rates below do not even divide by the* same *kind of denominator — 62.58 is the control's counter over
+    its `last_step` 3,314 and 53.09 is this arm's counter over its `steps_requested` 3,315, a number that
+    process never executed because it resumed from 501. On executed updates the pair is 62.55 against
+    62.57 draws — coverage-matched, and reproduced exactly by a
+    CPU replay of both drawers. The rest of this clause stays as the record of what was believed and
+    why the arithmetic looked right.]* `paraphrase_draws` is **176,003** on the `on` arm against **207,411** on the
+    `off`, over identical `paraphrase_sets` 17,112, the same seed, the same 3,315 updates and 18 of 20
+    flags byte-identical (§9.55(i)) — **53.09 draws/update against 62.58, i.e. 15.2% less paraphrase
+    coverage**, which the anti-prior sampler spends out of the same 8-sets-per-update budget. So
+    `--anti-prior` is not a pure two-flag pair after all: the flag changes the augmentation rate as well
+    as the label mix. **The size of that is unmeasured** — this repo has no `--paraphrase off` arm anywhere
+    in `SPEC.md`, so there is no committed witness for what 15% of coverage is worth, and the correct label
+    on "part of the −0.0554 is coverage, not the prior" is *projected, unbounded*, not measured. Two ways
+    to settle it, priced: a third arm at the control's coverage with the sampler forced to the same draw
+    count (another 2,814-update interval ≈ **5.4 h** of this box at the measured 6.896 s/update), or reading
+    the sampler's draw budget in `src/myna/data.py` and proving whether the prior-balancing selection and
+    the paraphrase draw compete for one counter — which costs no GPU hours and is the next thing to try
+    before spending any.
+    What the residue does *not* touch is the mechanism verdict: the in-run `anti_prior_audit` shows the
+    majority label's share cut 0.099–0.137 on all six treated cells, and Tier 0 shows all four emitters
+    stop emitting. Those are readings of this checkpoint, not of the macro, and an arm with more
+    coverage could raise 0.4785 without changing either — which §9.58 settles by showing this pair
+    already had the same coverage, so there was never a coverage reading left to buy.
+
+    **(xi) Durability, measured rather than assumed: the shipped bytes are the trained bytes.** `gh release
+    download antiprior_on_s0c-weights` into a scratch directory and re-hashing gives `model.pt`
+    67,733,781 B sha256 `4a720e4d7e15e3621edb05d8927f1e47aeaa442dcae23b1c8e52c903440d44a9` and
+    `tokenizer.json` 526,662 B sha256 `0252c24627eeebc2df5a577576c1c8b24e402da015c1d45519e7e1d8541ffdc3`,
+    each **identical to the local trained file** — the digest is also the one Tier 0 prints in its own
+    header, so the ablation in `tier0-on-arm` demonstrably ran on the shipped weights rather than a local
+    look-alike. What is *not* durable: the end-state `model_last.pt` (optimizer + scheduler, 203,229,625 B)
+    stays gitignored, so this checkpoint can be evaluated and cannot be continued. §9.56(ii)'s durability
+    gap is therefore half-closed — the weights shipped, the training state did not — and the only snapshot
+    of training state on the Release is the step-749 one under `antiprior_on_s0c-wip` (deleted 2026-10-05).
+
+    **(xii) What 10c is now evidence for, stated at the width the pair supports.** G1 is not met on either
+    arm and is 0.2215 away on the better one (the `off` control's 0.5339, whose margin clause observes
+    +0.1008 against the required +0.15). The training signal's association rule was worth 0.0554 of macro
+    and there is no reading underneath it that this experiment recovered, so §6's data-volume finding
+    (0.28 tokens/param) survives as the only un-tested lever, and Tier 0 survives as the reason: 15 of 16
+    cells now answer differently when their state is swapped, which means the inputs reach the decision —
+    they just reach a worse one. Nothing in this entry should be read as the mechanism being *wrong*: it
+    did what it was built to do, twice over, in the audit and in the ablation.
+
+    **(xiii) The closing gate pass, with its own logs, since a row without a witness is a projection.**
+    Nothing trained for these numbers and nothing was borrowed: each is the printed line of a command run
+    on this box with no other job on it.
+    - `make repro` → **34/34 rows hold; 101 figures tied to a committed witness, 1 gated with no witness**
+      (was 32 rows / 88 figures before rows `antiprior-on-macro` and `tier0-on-arm`), in 8 s.
+    - `make gates` → **7/7 verdicts hold — 3 of 7 met, 3 not met, 1 open — the release gate is NOT clear**,
+      in 8 s. G1 remains not met; (xii) is the width of that claim.
+    - `uv run pytest -q` → **561 passed, 1 skipped, 1 warning in 289.92s**, exit 0, in
+      `runs/suite_post_10c.log`.
+    - `bench/mutation_reproduce.py` → **29/29 mutations caught**, exit 0, in
+      `runs/mutation_reproduce_post_10c.log`. The count did not move with the row count, and that is the
+      right outcome rather than a missed test: these 29 mutants attack the *checker* (a quote assertion
+      that stopped appending, a tracked-witness branch made unreachable, a runner that runs what it should
+      refuse), so adding two rows adds no new way for the checker to lie. What the two rows do move is the
+      coverage literal in `tests/test_reproduce.py`, which went **25 → 27** of 34 rows checkable — the
+      mutation battery stays green only because that test reads the real `ROWS`, and the file prints
+      **38 passed** against it now.
+    The two logs are committed with this entry (`git add -f`; `.gitignore:24` covers `runs/*` and the only
+    thing that keeps a witness honest here is that it is tracked), so a future session can re-run all four
+    and diff against bytes rather than against prose.
+57. **Nobody had ever typed the commands a reader has to type, and the repo said "usable" anyway.**
+    §9.51's finding was that CI had never run the suite; this is the same failure one level closer to the
+    reader. Everything published before P11 was reproducible by someone holding this checkout, and the
+    first thing a stranger met in `README.md` was a gate table — there was **no install command anywhere
+    in it**. Four specific things broke, or would have broken, the moment someone tried:
+    - **`myna-serve`'s default `--ckpt runs/myna-v0` is a repo path.** A pip reader has no `runs/`, and
+      `Myna` answered with torch's `FileNotFoundError` for a directory that simply holds no weights. The
+      guard now checks `model.pt` and `tokenizer.json` and names the fix (`myna-weights --dest DIR`).
+    - **`serve.main()` took no argv.** So neither guard could be tested at all, which by §7.1 makes a
+      guard a projection: code that has never been observed to fire. `main(argv=None)` is what makes the
+      two new `tests/test_serve.py` cases possible.
+    - **The order was wrong.** The uvicorn import came first, so on a box without the `serve` extra the
+      checkpoint mistake — the common one — was unreachable behind a `ModuleNotFoundError` traceback. The
+      check now precedes the import, which is also the only reason the message is testable in CI, where
+      the extra is absent by design.
+    - **A missing extra was a traceback, not a sentence.** It now prints the pip line that installs it.
+    Also recorded here so nobody reads it as new weight: a fresh venv pulls one more transitive
+    dependency than the wheel's own list suggests, `huggingface-hub`, and that is required by
+    `tokenizers`, not by the fetcher — `weights.py` imports stdlib only, and
+    `tests/test_weights.py::test_the_fetcher_adds_no_dependency` keeps that a fact rather than an intent
+    (battery mutation 13, adding `import requests`, breaks it). One cosmetic consequence of exporting
+    `fetch_weights` from `myna/__init__.py`: `python -m myna.weights` prints a runpy `RuntimeWarning`
+    because the package `__init__` already loaded the module being run as `__main__`; the README
+    documents `myna-weights`, and the warning is a fact of that shape rather than something to paper over.
+
+    **(ii) Retracting a sentence written four hours earlier in this same section.** 11g said a
+    `bench/mutation_weights.py` battery was "deliberately not written", because the five lies had been
+    injected ad hoc and **5/5 caught**. Two things were wrong with that. The ad-hoc pass leaves no
+    re-runnable witness, so the claim "5/5" could only be checked by repeating it by hand — which is
+    exactly the §9.30 shape this repo refuses. And the pass was under-scoped in a way only writing the
+    battery exposed: nothing in `tests/test_weights.py` ever made `download()` fail, so its
+    `except`-branch cleanup had no coverage, and the obvious rot — a `.part` left beside a checkpoint the
+    release refused — would have **survived**. Making that reachable cost two tests
+    (`test_a_connection_that_dies_mid_download_leaves_no_temp_file`,
+    `test_a_truncated_body_is_refused_by_its_digest`: a truncated body is *not* an error to urllib, so the
+    digest is the only thing between a short download and a number `myna.report` will print for it) and
+    the file went 17 → **19**. The committed battery is `bench/mutation_weights.py`: **16 mutations over
+    `weights.py` and `serve.py`, 16/16 caught**, exit 0, in `runs/mutation_weights.log` — with what each
+    broke printed beside it, including mutation 1 (GitHub's `digest` field never read) being caught by the
+    tampered-asset test while mutation 2 (the comparison made unconditional) is caught by the mismatch
+    test, which is the pair that shows the check is load-bearing on both sides of the cache: the download
+    and the reuse. "Deliberately not written" was therefore not a scope
+    decision, it was an untested assumption about coverage.
+    Suite at this tick: **584 passed, 1 skipped, 1 warning in 285.38 s** (`runs/suite_post_P11.log`) —
+    561 + 19 new weights + 2 serve + 2 `--help` cases, exit 0, and `make repro` (7.65 s) / `make gates`
+    (8.30 s) still printing **34/34 rows, 101 figures** and **3 met / 3 not met / 1 open — NOT clear**,
+    because P11 adds no measurement *of the model* and so no registry row.
+
+    **(iii) One figure in this section's own draft was carried, not read, and rebuilding caught it.**
+    11b first said the built wheel is "25 files / **262,941 B**". `uv build --wheel` on this tree produces
+    **95,644 B** — 264,410 B uncompressed, which is what the carried number was close to and therefore
+    why it read plausible. The file count was right, the byte count belonged to no artifact on disk. It
+    is corrected in place before the commit rather than left as a live citation of a build nobody has,
+    which is the §9.30 failure this log exists to keep counting. Nothing published quoted it, so no
+    registry row and no README line moves: `grep -rn 262,941 README.md SPEC.md TODO.md` hits only the two
+    lines of this entry.
+58. **The anti-prior pair's "15% less paraphrase coverage" was a denominator, not a measurement — and
+    the free replay the entry told us to run before spending GPU hours says so in 21.7 seconds.** §9.56(x)
+    closed 10c with a residue: the `on` arm's **176,003** `paraphrase_draws` against the control's
+    **207,411**, called **53.09 against 62.58 draws per update — 15.2% less coverage**, and left the
+    −0.0554 *partly unattributed* because of it ("part of the −0.0554 could be coverage rather than the
+    prior"). It priced two settlements — a third arm at the control's coverage (≈ **5.4 h** of this box)
+    or reading the sampler for free — and said the free one is what to try first. The free one answers
+    the question outright, and the answer is that the residue never existed.
+
+    **(i) The two numbers divided by two different kinds of denominator.** Every figure needed for this
+    is already in the two committed `metrics.json` files; nobody had lined them up:
+
+    | arm | `paraphrase_draws` | `last_step` | `steps_requested` | `resumed_from_step` | updates that **ran** |
+    |---|---|---|---|---|---|
+    | `antiprior_off_s0` | 207,411 | 3,314 | 3,600 | 0 | **3,315** (the step-time guard stopped it) |
+    | `antiprior_on_s0c` | 176,003 | 3,314 | 3,315 | 501 | **2,814** |
+
+    `last_step − resumed_from_step + 1` is the dose a counter belongs to. The control's 62.58 is
+    207,411 over its `last_step` 3,314 — exact value 62.5863, so the entry's "62.58" is also a
+    truncation, printed here at full width because a quoted rate gets re-derived rather than re-read;
+    the `on` arm's 53.09 is 176,003 over
+    its `steps_requested` 3,315 — a number that process never executed, because it resumed from 501. On
+    the denominator each counter is actually attached to, the pair is **62.57 against 62.55 draws per
+    executed update, ratio 0.9996**. The two runs are coverage-matched to within 0.04% (1 − 0.99965),
+    and the 15.2% is arithmetic on a mismatch (ratio 0.8483).
+
+    **(ii) The print itself was the source of the wrong instinct, and it is fixed.** Both trainers ended
+    with `paraphrase: 207411 phrasing draws reached the batches over 3600 steps`
+    (`runs/antiprior_off_s0.train.log:3415`) and `… 176003 … over 3315 steps`
+    (`runs/antiprior_on_s0c.train.log:3417`) — `--steps`, i.e. what was *asked*, which is neither the
+    3,314 §9.56(x) used for one arm nor the 3,315 it used for the other. `train.py` now computes
+    `updates_executed = max(last_step - start_step + 1, 0)`, prints "over {N} updates executed (of
+    {steps} requested, resumed from step {k})", and writes `updates_executed` beside `steps_requested`
+    in `metrics.json`, so the next reader gets the denominator off the same artifact as the numerator.
+    Gate: `tests/test_paraphrase_wiring.py::test_the_draw_rate_divides_by_updates_that_ran_not_by_steps_asked_for`
+    runs two short processes over one shared suite and asserts the resumed one reports `3` of `5` with
+    `resumed_from_step == 2`. `bench/mutation_paraphrase.py` grows 29 → **32** with the three mutations
+    that revert each half of that (rate over `--steps`; dose ignoring `--resume`; metrics recording the
+    requested dose as the executed one); **32/32 caught**, exit 0, 1:31.83, in
+    `runs/mutation_paraphrase_post_958.log`. The two 14-battery rosters in this file and in `TODO.md`
+    still print paraphrase **29/29**, and correctly so: each says plainly that its numbers were read off
+    the log a watched process closed in *that* session, and `runs/mutation_paraphrase.log` is that
+    witness, untouched — a battery count is a record of a run, not a version number. The live count is
+    the one §5 15g and §3.4 now print.
+
+    **(iii) The replay reproduces both counters exactly, so this is a fact about the sampler and not
+    about my reading of it.** `bench/coverage_replay.py` imports `draw_row_batch`, `WeightedDraw` and
+    `Paraphraser` from the shipping modules and consumes the RNG stream the way the training loop does —
+    the batch attempts, then one `paraphraser.draw(...)` per accepted row, K times per update — with no
+    model, no device and no training. Nothing else in the loop touches that `random.Random`, which is why
+    the totals are comparable to the runs' rather than merely analogous. Two guards make that claim
+    falsifiable rather than asserted: the corpus banner must come out byte-equal to the line in both
+    arms' train logs (`57904 rows in one pool, 17112 question sets, widest row 3 questions x 40 tokens`),
+    and each arm's replayed total must equal the `paraphrase_draws` in its own `metrics.json` — exit 1 if
+    either fails. Both arms pass: **off 207,411 EXACT, on 176,003 EXACT**, 21.7 s wall on this box
+    (`runs/coverage_replay.log`). So `--anti-prior` does not spend the augmentation budget:
+    `self.draws += 1` (`src/myna/paraphrase.py:405`) is per *accepted row*, and
+    `WeightedDraw.index` (`src/myna/train.py:59`) consumes one `rng.random()` per *attempt* — no shared
+    counter, no trade, nothing for the prior-balancer to eat. What §9.56(x) told the next reader to open
+    — "the sampler's draw budget in `src/myna/data.py`" — names the wrong file: `data.py` is the
+    synthetic generator and has no draw counter at all; the sampler is `train.py` plus `paraphrase.py`.
+    A pointer written mid-run that nobody re-read against the tree, which is the §9.30 shape again.
+
+    **(iv) What the replay found that nobody was looking for: `--batch 10` is not what the model
+    sees.** The uniform drawer reaches a full 10-row batch on **56.5%** of its batches (14,982 of
+    26,520) and the anti-prior drawer on **56.2%** (12,651 of 22,512); mean **7.821** rows/batch against
+    **7.818**. So the arms ran ≈ **62.6** rows/update, not the 80 that `--batch 10 × --accum-groups 8`
+    suggests, and the shortfall is `--max-q-cells 2048` plus the distinctness rule (`draw_row_batch`
+    takes at most `batch` *distinct* rows and gives up after `batch × 40` attempts) — not the
+    re-weighting. This is a property of the batching both arms share, so it moves no published figure;
+    it does mean any future dose claim should be stated in rows, because the row count is what the
+    gradient sees, and 43.5% of the uniform drawer's batches and 43.8% of the anti-prior drawer's are
+    shorter than the flag says.
+
+    **(v) What this entry changes and what it refuses to change.** Changed: the sentence "at the dose
+    this box can afford, removing the shortcut costs 0.0554 of the macro, and part of that could be
+    coverage" becomes **removing the shortcut costs 0.0554, attributed entirely to the label prior** —
+    the pair is coverage-matched, so the mechanism reading underneath the number is the whole number,
+    and §9.56(x)'s proposed third arm is not worth its 5.4 h. Also withdrawn from the record as live:
+    10c's "one residue this adds to the pair", SPEC §5 10c's coverage clause, and the README's draw-rate
+    sentence — all three now name the executed dose. Unchanged, because nothing here re-measures the
+    model: `on` **0.4784612299508689** against `off` **0.5338735348381732** (−0.0554123048873043), 0
+    emitters against 4, 15 movers against 10, G1 still not met, `make gates` still
+    **3 met / 3 not met / 1 open — NOT clear**. One thing this entry cannot say: the `on` arm's *total*
+    draws across both of its processes is recorded nowhere — the resuming process overwrote `metrics.json`
+    and its counter starts at zero, so the first process's counter is gone. The comparison that is
+    supported is the rate per executed update, which is what both arms report and what the replay ties
+    out; nobody should read 176,003 as the arm's lifetime augmentation count, and no total for it exists
+    to quote (501 updates at the replayed rate would be ≈31,000 draws — that is arithmetic on a replay,
+    labelled projected, not a number any artifact printed).
+
+    **(vi) Re-verification on the tree this entry changes, each number a line a command printed on an
+    otherwise idle box.** `uv run pytest -q` → **585 passed, 1 skipped, 1 warning in 287.10 s**, exit 0,
+    in `runs/suite_post_958.log` (584 + the one new draw-rate test). `make repro` → **34/34 rows hold,
+    101 figures tied to a committed witness, 1 gated with no witness**, 9.80 s — no row moves, because
+    this entry re-attributes a figure that was already published rather than measuring a new one.
+    `make gates` → **7/7 verdicts hold — 3 of 7 met, 3 not met, 1 open, the release gate NOT clear**,
+    9.74 s. The two new logs (`runs/coverage_replay.log`, `runs/mutation_paraphrase_post_958.log`) and
+    the suite log are committed with this entry, so the withdrawal can be re-derived:
+    `python bench/coverage_replay.py` must print `EXACT` twice and exit 0, and if the sampler ever drifts
+    from what the runs did it exits 1 instead of printing a comforting table.
+59. **§5 11d's conditional resolved: the install line the README prints has now been executed exactly as
+    printed, and four runs of its five lines answer with one identical float.** 11d could only
+    report what an unpushed tree permitted — the documented `git+https` line installed the pushed tip
+    `c29494e` and printed `fetch_weights` **absent** — and it closed with *"It becomes true the moment this
+    is pushed."* `fe11db6` is on `origin/main`, so the sentence had to be re-run rather than re-read, and it
+    now passes.
+
+    **(i) What changed on disk, as the command printed it.** A fresh venv (`uv venv --seed --python
+    3.12`, pip 26.2.1) takes the README's own line verbatim: `Resolved https://github.com/anonymous/myna
+    to commit fe11db6fc67bb7a69e63088f5dea594870a4d2ff` → `Successfully installed … myna-0.1.0 … torch-2.14.1`,
+    exit 0. `import myna` resolves to `/tmp/venv-pub/lib/python3.12/site-packages/myna/__init__.py` with
+    `cwd=/tmp`, so the checkout is nowhere on `sys.path` and cannot answer about itself — the run has to
+    prove which copy replied before it is allowed to report what that copy said. Inside that copy:
+    `myna.fetch_weights` is present, `find … -name "*.pt" | wc -l` is **0** so the wheel still ships no
+    weights, and `myna-weights --dest /tmp/pub-fetch --force` pulls the Release over
+    stdlib `urllib` with no `gh` and no token, printing **30f0fa93…** / **0252c246…**. Those two files pass
+    `shasum -a 256 -c SHA256SUMS` (2/2 `OK`, exit 0 — a tool that is not myna checking the fetcher) and
+    `cmp` byte-identical against `~/.cache/myna/antiprior_off_s0-weights`.
+
+    **(ii) Four runs of the snippet, three environments, two fetch mechanisms, one float.** The quickstart's
+    five lines, run from the pip-installed copy against the default cache, print **`billing`** /
+    confidence **0.7899749875068665** / weakest `shipping`
+    **0.00027509400388225913** / `params 16926848` / `temperature 1.5` / `latency_ms` **7.93**; the same
+    engine pointed at `/tmp/pub-fetch` (bytes fetched minutes earlier by the console script) prints the same
+    choice and the same confidence at **6.67** ms. Read beside `runs/quickstart_from_gh_download.log`
+    (**7.84** ms, `gh release download`, in the repo's own `uv` environment) and
+    `runs/quickstart_from_git_install.log` (**6.98** ms, the unpushed tree over `git+file://`), that is
+    **four snippet runs across three environments and two fetch mechanisms, agreeing on
+    0.7899749875068665 exactly**. Only `latency_ms` moves, which is the §9.23 rule in miniature: quote the
+    float, never the milliseconds. The published `0.5338735348381732` macro is a property of the Release
+    bytes, and this is the witness that a stranger who has only the README and a laptop reaches those same
+    bytes.
+
+    **(iii) Why this is a correction and not a checkmark.** 11c's witness had to substitute
+    `git+file:///tmp/miga` for the documented URL, and its committed header still says *"the packaging under
+    test is unpushed"* — true at the moment it was written (the clone it installed, `21e9224`, was on no
+    remote) and stale as an answer to "what does the README's line do" now. That header is **left
+    exactly as it is**: a witness records the tree that produced it, and rewriting a committed transcript to
+    match today is how a log stops being evidence. The relabelling lives here and in 11d's own text instead.
+    The class behind it is §9.57's — *"nobody had ever typed the commands a reader has to type"* — one
+    level further out: not typed on a machine that happens to hold the checkout, but typed exactly as the
+    README writes it, from outside the repo, resolving to a commit that is on the remote. §9.51 is the same
+    failure at the other end (CI had never run a single test behind a green count), which is why the
+    re-run had to be done after the push rather than argued from the pre-push witness.
+
+    **(iv) CI answered for the pushed tip.** Run **36903335716**, `ci` workflow, `headSha` `fe11db6…`:
+    `createdAt` 2026-10-01T17:58:16Z → `updatedAt` 2026-10-01T18:12:29Z, `status` `completed`,
+    `conclusion` **`success`** (14 m 13 s). `c29494e` and `9682639a` both report `success` behind it, so
+    main has been green for three consecutive tips. What this entry adds afterwards is prose and one log
+    file, so it needs its own run: the three checks re-run on the tree this entry leaves print
+    **585 passed, 1 skipped, 1 warning in 276.90 s**, exit 0 (`runs/suite_post_959.log`; the 585/1 count is
+    unchanged because no test moved), `make repro` **34/34 rows, 101 figures, 1 gated** (exit 0, 8.24 s) and
+    `make gates` **7/7 verdicts — 3 met / 3 not met / 1 open, the release gate NOT clear** (exit 0, 8.06 s).
+    No model measurement moved, so no registry row changes.
+
+    **(v) Unchanged by this entry.** PyPI and the Hugging Face Space stay user-side — this repo has no
+    credential for either, and 11d passing says nothing about `pip install myna` resolving from the
+    index. G1 is still not met at **0.4785 / 0.5339 / 0.4893** against **0.70**; what got stronger is the
+    distance between *the engine works and you can install it* and *the engine is right often enough to
+    ship*, and §2.2 keeps both lines in the same table on purpose.
+
+60. **The name `myna` on PyPI is a 0-file placeholder nobody can transfer, so the distribution is now
+    `myna-engine` — and one `module-name` line is the only thing between that rename and a build that
+    cannot find the package.** `runs/pypi_readiness_audit.log` holds the whole exchange, both parts.
+
+    **(i) What the lookup measured.** `curl https://pypi.org/pypi/myna/json` → **200**, and the project
+    behind it is `version 0.1`, `summary ""`, `author ""`, `project_urls null`, one classifier
+    (`Framework :: BFG`), with **0 files in each of its two releases** and neither yanked. Real pip
+    (26.2.1, `--index-url https://pypi.org/simple`) answers both forms with
+    `ERROR: Could not find a version that satisfies the requirement myna (from versions: none)` — so the
+    name is
+    simultaneously blocked and unusable, and a PEP 542 name transfer is issued by the *current owner's*
+    verified email — that half is PyPI's documented policy, not something this repo could measure, and it
+    is why the answer is a new name rather than a claim on that one. Ten names were probed with the same
+    404/200 question and nine came back free; `myna-engine` is the one now claimed.
+
+    **(ii) The load-bearing line, found by the build refusing to work.** `uv_build` infers the module
+    from the *distribution* name, so renaming alone fails at `Getting build dependencies`:
+    `Expected a Python module at: src/myna_engine/__init__.py`, exit 2. The fix is metadata, not code —
+    `[tool.uv.build-backend] module-name = "myna"`. Three mutations, each run against a copy in
+    /tmp/mut rather than by editing the repo's file: deleting that pin reproduces the exit-2 failure
+    with 0 wheels; deleting `license-files` leaves `License-Expression: Apache-2.0` in METADATA but
+    drops the packaged file (0 license entries), which is two independent jobs, not one; deleting
+    `readme` brings twine's `long_description` warnings back verbatim on both artifacts. One classifier
+    left during the same pass: `uv build` warned on *every* build that
+    `License :: OSI Approved :: Apache Software License` is deprecated per PEP 639 once
+    `project.license` is set, so it was the duplicate of a line already present, and `uv build` is now
+    silent.
+
+    **(iii) What ships now, and which builder printed it.** wheel **121,666 B**, sdist **131,560 B**,
+    27 files / **332,809 B** uncompressed, `*.pt` count **0**, and the single hit from the wheel's own
+    `\.pt$|secret|token|key` grep
+    is still `myna/tokenizer.py` — `token` inside `tokenizer`, a false positive and reported as one.
+    `python3 -m twine check dist/*` → both **PASSED** with no warning line at all, against the pre-edit
+    "**PASSED with warnings**" twice. METADATA is now `Metadata-Version: 2.4` with `Name: myna-engine`,
+    `License-Expression`, `License-File: LICENSE`, `Description-Content-Type: text/markdown` and **843
+    lines** where it had 29, because README.md is absorbed as the page body. The builder has to be named
+    with the number: `uv build --wheel` on the identical pyproject gives **121,667 B / sha256 cc600090…**
+    where `python3 -m build` gives **121,666 B / sha256 99718fa7…**, same 27 files and same 332,809 B
+    uncompressed. That is why 11b now says which command it ran. Determinism was checked rather than
+    assumed: rebuilding `git show HEAD:pyproject.toml` in a sandbox reproduces **95,902 B / sha256
+    0a09390662…**, byte-identical to the wheel pip built from `fe11db6` over `git+https`, so the entire
+    delta in the artifact is this entry's metadata and nothing else.
+
+    **(iv) What the rename did not touch, and the one figure it retired.** The import namespace is still
+    `myna`, `[project.scripts]` still resolves `myna-serve` / `myna-train` / `myna-weights`, and `uv
+    sync` installs `myna-engine==0.1.0` while `import myna` lands in `src/myna/__init__.py`. The hazard
+    that would have made this break loudly — a module calling `importlib.metadata.version("myna")` at
+    import — does not exist here: `grep -rnE "importlib|__version__|pkg_resources|version\(" src/myna/*.py`
+    prints nothing (and it has to be `-E`: without it the alternation is a literal string that matches
+    nothing for the wrong reason). `uv.lock` moved by exactly one line (the project's own name) and is committed beside
+    pyproject so CI's `uv sync` does not re-lock against a stale file. What *is* retired: §9.59's
+    byte-identity between the PyPI-candidate wheel and the `git+https` wheel is now history-only — a
+    wheel built after this commit is 121,666 B, not 95,902 B. §5 11b and TODO 11b are corrected in place
+    with a pointer here; §9.57's dated numbers (the 95,644 B / 264,410 B pair, and the 262,941 B that
+    entry retired before it) stay as written; 11h in both files now reads
+    `pip install myna-engine`, while §9.59(v)'s `pip install myna` is left alone because a dated witness
+    records the tree that produced it and the correction lives here instead.
+
+    **(v) The install line re-run, because the pin changes what a reader's pip actually builds.**
+    `git ls-files | tar` of HEAD plus the new pyproject, committed locally as `4e5e0be`, then
+    `uv venv --seed --python 3.12` (pip 26.2.1) and the documented VCS install → **exit 0**, with
+    site-packages holding `myna/` under `myna_engine-0.1.0.dist-info/` and RECORD listing all three
+    console scripts. From `cwd=/tmp`, with the checkout absent from `sys.path`, the installed copy
+    answers `params 16926848` / `temperature 1.5` / `billing` / **0.7899749875068665** — the sixth run of
+    those five lines on a fifth environment. Not claimed: the `git+https://` form over the *pushed* tip.
+    `git+file://` is the stand-in until this is pushed, and then it gets re-run rather than inferred,
+    which is exactly the §9.59 lesson applied one commit later.
+
+    **(vi) What this session damaged, because a re-verify that hides its own footprint is not a
+    re-verify.** Testing the new name in a throwaway venv involved `rm -rf` on this repo's `.venv`, and
+    the rebuild used `uv sync --extra browser` — which does not install the **mlx** extra the deleted venv
+    had. The first suite run after the metadata edit printed **7 failed, 567 passed, 3 skipped**, exit 1,
+    and every failure was `ModuleNotFoundError: No module named 'mlx'` raised at `src/myna/mlx_model.py:24`:
+    two bench-script `--help` renders (`bench_mlx.py`, `diag_mlx_int8_gem.py`), `test_the_committed_tree_passes`
+    in both harnesses, and three gate proofs — `test_an_unmutated_verdict_holds`,
+    `test_every_proof_field_still_holds_in_its_artifact`, `test_the_registry_itself_is_part_of_g7s_proof`.
+    Nothing about that is the rename — it is a registry that gates on *command
+    runnability* (8b's falsifiable half) noticing a missing optional dependency, which is the only reason
+    a broken environment produced seven loud failures instead of a green count. The asymmetry with CI is
+    deliberate and lives at `bench/reproduce.py:684-691`: `MLX_UNLOADABLE` excuses exactly
+    `ModuleNotFoundError: No module named 'mlx'` and `ImportError: libmlx.so`, and `mlx_unloadable_here`
+    grants that excuse only when `platform != "darwin"`, because off macOS the wheel installs and cannot
+    load (§9.51) — so the
+    runner's `uv sync --extra browser` is correctly green while this Mac's must carry
+    `--extra mlx`. Repaired with
+    `uv sync --extra browser --extra mlx` (+ `mlx 0.32.2`, `mlx-metal 0.32.2`), and the seven are
+    re-created on purpose in `runs/suite_mlx_extra_missing.log` — the transcript of the original failing
+    run having been overwritten by the passing re-run under the same filename, which is this session's
+    own mistake and is the reason the reproduction exists. Two traps that log records: those help-render
+    tests replace `PYTHONPATH` in their subprocess `env`, so a stub package on the path cannot reach
+    them and only a genuinely mlx-less venv fails them; and `uv run pytest` re-installed the missing
+    extra mid-command on the first attempt, printing a meaningless `114 passed`, so the reproduction has
+    to invoke `.venv/bin/python -m pytest` directly. The rebuilt venv also
+    resolved **torch 2.14.0** where §9.59's witnesses cite 2.14.1, and since no test asserts the
+    published confidence literal, the snippet was re-run directly: **0.7899749875068665**, unchanged.
+
+    **(vii) Re-verification on the tree this entry leaves.** `uv run pytest -q -rs` → **585 passed, 1
+    skipped, 1 warning in 294.27 s**, exit 0 (`runs/suite_post_pypi_rename.log`) — the same 585/1 §9.59
+    printed, so the metadata edit moved no test; `make repro` → **34/34 rows, 101 figures tied to a
+    committed witness, 1 gated** (exit 0); `make gates` → **7/7 verdicts — 3 met / 3 not met / 1 open,
+    the release gate NOT clear** (exit 0). No model measurement moved, so no registry row changes.
+    **Nothing was uploaded**: `twine upload` was never run, no credential was used, and publishing
+    remains 11h's user-side call with a name now chosen and claimed. G1 is still **0.4785 / 0.5339 /
+    0.4893** against **0.70**; a registered name changes none of it.
+
+61. **The `--long-context` loop was the one path in the repo that could be launched at 4k tokens with
+    none of the suite's survival discipline, and the gate written for it found two holes in *itself*
+    before it reported on the code.** TODO 7b's preconditions, 2026-10-28/29, all three of them
+    executed as code work with tests and mutants before any training clock was started.
+
+    **(i) What was missing.** `train_long_context` printed a state/grad/params line, then trained. It
+    had no memory plan, no `--save-every` cadence, no `--resume`, no stop rule and no `metrics.json`;
+    the only write in the loop was a weights-only blob on the eval cadence — no optimizer, no step
+    counter, no record of the dose. A 4k run killed at 90% would have left nothing to continue from
+    and nothing to say what had run, which is the failure class §6 was written after. It also carried
+    three defects that only show up when you try to *measure* the path: `--config scaled` named
+    `MynaConfigScaled`, a symbol that function never imported (`MynaConfigScaledT4` is the one), so
+    asking for the bigger trunk raised `NameError` *after* the refusal it was supposed to be able to
+    print; `--warm-start` was accepted and silently ignored; and the eval cadence's blob was not a
+    resumable file, so the one save the path made was the one `--resume` could not use.
+
+    **(ii) 1a — the generator's grad window.** `make_needle`'s `tail_cap` branch walked back to the
+    earliest sentence boundary whose suffix fit and then drew from that single index, so every
+    training row put the needle at the deepest position the cap allowed: the run taught one depth,
+    not retrieval. It now draws uniformly over the whole fitting window. The `tail_cap is None`
+    branch — every eval row — is byte-identical, which is what keeps the published n=16 ladder a
+    control for the n=60 ladder rather than a different experiment. `tests/test_longctx.py` 13 → 15,
+    `bench/mutation_longctx.py` 20 → 24 (**24/24 caught**, `runs/mutation_longctx.log`).
+
+    **(iii) The first pass of 1a's spread test caught nothing, and the reason was the test.** Adding
+    "pin the draw to the window's earliest edge" as a mutant scored 23/24: absolute `pos` and
+    trailing-token count both still move from draw to draw when the *relative* depth is fixed, so an
+    assertion written on the absolute numbers passes against a needle pinned to one depth. The test
+    now normalises depth to the window (`(pos - earliest) / (len(filler) - earliest)`) and asserts the
+    spread on that — mean in (0.25, 0.75), maximum above 0.5, at least five distinct rounded depths,
+    and 30 of 60 draws strictly deeper than the edge. A gate that measures the quantity the mutant
+    leaves untouched is not a gate.
+
+    **(iv) 1b — the same five claims, re-witnessed rather than assumed to travel.** The plan is priced
+    off the **gradient window** (`min(grad_tokens, p95)`) and not the state length, because the prefix
+    is scanned under `no_grad` and retains no backward activations; pricing the state would halve the
+    batch this box can carry and the run would still finish, which is the silent direction. The
+    witness for that choice is a headroom that separates the two axes (0.2083 GiB buys batch 2 on a
+    64-token window and batch 1 on the 290-token state), so "sized by the state" is a caught mutation
+    and not a reading. Cadence default 25 with 50 enforced as a refusal rather than a clamp — clamping
+    would train a different run than the one asked for. `--long-context` now refuses `--warm-start`
+    instead of ignoring it. Swap is a stop signal on this loop alone (`parse_swapusage` /
+    `swap_used_bytes` / `swap_abort_reason`, Darwin-only, 4.0 GiB inclusive ceiling), because §6's
+    ceiling for this box is a *system* budget and a run that has started paging is already the failure
+    the OOM would finish. `tests/test_train_longctx.py` (20) and `bench/mutation_train_longctx.py`
+    (24) are new; `tests/test_memory_plan.py` keeps the suite path and now says so in its docstring.
+
+    **(v) Its first pass reported 22/24 and both survivors were holes in the gate.**
+    "the tail is estimated from one state" survived because `metrics.json` recorded
+    `LONG_CTX_P95_SAMPLES` — the constant the source asks for, not the number of states it drew — and
+    because this generator has no tail to measure: at a 4096-token target the 60 probes come back
+    **min 4096 / p95 4106 / max 4108**, so a one-state sample produces the same number as a
+    sixty-state one and the arithmetic cannot tell them apart. The record now carries `len(probe)`
+    with `state_tokens_min`/`state_tokens_max` beside it, which is the only form of this claim that
+    is checkable. "resume loads the weights but not the optimizer" survived because *every* counter
+    the resume test read came from the snapshot, so a weights-only resume prints a perfectly correct
+    dose while continuing on a fresh Adam; the test now compares the schedule's `T_max` (4 — the first
+    command's, where a rebuilt scheduler would say 6) against Adam's own per-parameter step count (6 —
+    four restored plus two executed). **24/24 caught**, exit 0, `runs/mutation_train_longctx.log`;
+    suite **609 passed, 1 skipped** (`test_upstream.py`'s `KEV_ROOT` skip, unchanged).
+
+    **(vi) 1c — the smoke probe, and the instrument that would have lied.** Five updates on the exact
+    approved flags (`--long-context 4096 --grad-tokens 1024 --batch 3 --device auto --free-gib 9.0
+    --stop-factor 3.0`) take a median of **2.0194742679595947 s/update** on this box (torch 2.14.0,
+    MPS, 15,353,984 params), which *projects* 1200 updates at ~41 minutes rather than the hours the
+    token count suggests — measured per-update, extrapolated only by multiplication. The detached
+    3072-token prefix costs compute and no retained activations; the 1024-token tail is the only half
+    the plan prices. The plan it printed before the first allocation says `batch 3 fits 9.0 GiB free x 0.6
+    at 1024 grad tokens (needs 2.4 GiB retained)`; no clamp fired, so the approved batch is the batch
+    that ran (`batch == batch_requested == 3`). Peak bytes are reported twice because the two
+    instruments disagree on Apple Silicon: `ps` sampled at 2 Hz through the whole run peaks at
+    **700368 KiB of RSS**, while `/usr/bin/time -l` on the same command reports a max RSS of
+    **674725888 B** and a **peak memory footprint of 3899131392 B (3.63 GiB)** — the Metal working set
+    is not fully charged to RSS, so the footprint column is the one that belongs beside §6, and the
+    2.4 GiB projection sits inside it. Swap never moved off `used = 0.25M` of a 1024.00M total, and
+    the run exited 0 with `stopped: null`. Two cold runs of one command agreed to the printed digit on
+    the steps they share (loss 1.861 then 2.316; batch-acc 0.333 then 0.000), so `--seed 0` pins init
+    and data order on this path too. Witness: `runs/lc0_smoke_s0.train.log` +
+    `runs/lc0_smoke_s0.metrics.json`.
+
+    **(vii) The other half of 1c's lesson.** The first attempt wrapped `/usr/bin/time -l` around
+    `uv run python -m myna.train`, which is the command the runbook prints. It reported a peak of
+    **14320120 bytes** — 13.7 MiB — because `time` measured `uv`, which spawns the interpreter rather
+    than becoming it. A clean bill of health for a job that actually holds gigabytes, printed with the
+    same confidence as the real number. The re-run puts the wrapper on the interpreter itself, after
+    `uv run python -c "import sys; print(sys.executable)"` proved both routes are the same
+    `.venv/bin/python3` at torch 2.14.0. A measurement whose instrument is aimed at the wrong process
+    is not a conservative estimate; it is a different measurement.
+
+62. **7b was labelled `KAGGLE`, and the compute was never what blocked it: the M5 carried the 4k
+    needle run exactly as §6 prices it, and the run stopped because the task was not being learned.**
+    PHASE 2's approved command, 2026-10-28, aborted at its own pre-committed Stage A rule.
+
+    **(i) The run.** `uv run python -m myna.train --long-context 4096 --grad-tokens 1024 --batch 3
+    --steps 1200 --lr 6e-4 --seed 0 --device auto --save-every 25 --free-gib 9.0 --stop-factor 3.0
+    --out runs/lc1-4k-s0` — cold start, no `--init`, no `--warm-start`, no `--paraphrase`, no
+    `--score-loss emd`, no `--anti-prior`. Launched 19:33:07Z as uv PID 53623 / python PID 53625;
+    nothing else training alongside. The plan it printed before the first allocation is 61(iv)'s
+    discipline working as designed: `state=4096 grad=1024 params=15353984`, `memory plan: batch 3 fits
+    9.0 GiB free x 0.6 at 1024 grad tokens (needs 2.4 GiB retained)` — no clamp, so the batch that ran
+    is the batch asked for — and `3 rows x 4106 p95 state tokens -> 3082 detached scan + 1024
+    gradient-carrying per row (split at 3072)`.
+
+    **(ii) What the box did.** 425 updates executed in ~15 minutes (the log's own elapsed counter
+    reads 830 s at step 400), per-step readings 1.91 / 2.02 / 2.16 / 2.26 / 2.39 s against 1c's
+    measured median 2.0194742679595947 s. **No machine abort fired**: `grep -c "STOP at step"` is 0,
+    swap sat at `used = 0.25M` of a `total = 1024.00M` the whole time, and there was no Metal OOM. So
+    §6's 32 GB ceiling was not approached, and a 4k-token needle run is a ~2 s/update job on this
+    laptop. The `KAGGLE` tag on 7b was inherited from a plan written before the plan-printing code
+    existed; it attributed the gate to a GPU. The gate is data and dose, not compute.
+
+    **(iii) What the model did.** Loss at the logged steps: 1.861 (0), 1.885 (100), 1.806 (200), 1.819
+    (300), 1.823 (400); ema 1.817 at step 400. A uniform 6-way answer scores `ln(6) = 1.7918`, so the
+    training loss after 400 updates is **0.031 nats above chance** and has not moved monotonically;
+    batch-acc alternates 0.333 and 0.000 on a batch of 3 sharing one entity, which is one row right or
+    none. This is the constant-emitter signature §9.43 already knows, at the needle task.
+
+    **(iv) The Stage A boundary, and the rule doing its job.** `model_last.pt` at step 399 copied
+    outside `runs/` to `~/myna-staging/lc1-4k-s0/stageA/` and re-hashed on both sides
+    (`f389bde507f381c1fb0540d3095b552f26d539be2a6e1eb506b31419e49ca335`, re-verified after the kill;
+    the in-repo file has since been overwritten by the step-424 save). Reconstructed into a
+    ladder-loadable dir — `model.pt` from `state_dict`/`cfg`/`temperature` plus the snapshot's
+    `tokenizer.json`, and `scheduler T_max = 1200`, which is the witness that the schedule still
+    covered the whole dose rather than a re-scaled remainder. `bench/eval_needle.py --n 60 --seed 0
+    --device cpu --lengths 128 1024` on that checkpoint: **128 → 0.16666666666666666 (10 of 60),
+    1024 → 0.21666666666666667 (13 of 60)**, 1 s.e. 0.0481, `readable: false`. The rule is "abort and
+    report if the 128-rung is below 0.267"; 0.167 is the floor itself (`chance + margin = 0.2667`), so
+    it fired with no room for interpretation, and the 1024 rung's 3-row lead over 10/60 is inside one
+    s.e. — no rung is separable from chance. Killed by exact PID (53625, then 53623, which was already
+    gone when its child died), `pgrep -fl myna.train` empty afterwards. **G4 stays not met and this
+    stopped run does not judge it** (Condition 3), which is also why the ladder stops at two rungs:
+    the remaining three would have cost ~9 more minutes of CPU to measure decay on a curve that has no
+    recall in it.
+
+    **(v) What a 35 % dose does and does not prove.** 425 of 1200 updates is not the approved dose,
+    the cosine schedule had barely begun to decay, and so this run does **not** establish that 1200
+    updates would fail. What it establishes is narrower and is the thing the rule was written for: at
+    a quarter of the way in, on a box with 2.4 GiB of the plan actually retained and swap untouched,
+    the checkpoint is no better than chance at the *shortest* rung, where the whole state fits in one
+    window and no retrieval distance is involved. Continuing to 1200 to find out would spend 41
+    minutes of the owner's machine against a pre-committed instruction not to.
+
+    **(vi) The witness gap an outside kill leaves, which is 61(iv)'s claim read correctly.**
+    `runs/lc1-4k-s0/` holds `model_last.pt` + `tokenizer.json` and **no `model.pt`, no
+    `metrics.json`**: the guaranteed final save, the ladder file and the record of the dose all live
+    after the step loop, so an external `kill` produces none of them. What bounds the loss from an
+    outside kill is the `--save-every 25` cadence and nothing else — the final save guards the loop's
+    own exits, not a signal. The dose here is therefore read from the log (425 updates, last snapshot
+    step 424, 830 s at step 400) rather than from a `metrics.json` that does not exist, and this entry
+    says so instead of quoting a file it did not get.
+
+    **(vii) Why the `ms` column in this witness is not a latency figure.** The eval had to run while
+    the trainer kept running — one continuous process is what makes the cosine schedule honest across
+    a staged dose — so it was capped at `OMP_NUM_THREADS=2 nice -n 15` to keep its own CPU work from
+    inflating a step time and tripping the 3.0× median abort. Result: 113.93 ms/sample at 128 and
+    1318.74 ms at 1024, versus v0's untuned 59.5 and 448.8. Accuracy cannot move with thread count and
+    G4 is stated over accuracy, so the throttle costs a latency comparison and nothing else; the
+    latency axis is left unmeasured rather than quietly claimed.
+
+    **(viii) The curves are beside each other, not one in place of the other.** n=60 vs n=16 (1 s.e.
+    0.0481 vs 0.0932), 15.35M params vs 14.45M, a cold-started needle model vs v0's suite checkpoint,
+    device cpu and seed 0 identical. `temperature` reads 1.0 here and 3.0 in `runs/needle_myna-v0.json`
+    and is **not** a confound: `bench/eval_needle.py:116` records `myna.temperature` into the witness
+    and never applies it to the score, so no accuracy can differ on that axis. Witnesses:
+    `runs/lc1_4k_s0.train.log`, `runs/lc1_4k_s0.stageA.log`, `runs/needle_lc1_stageA.{md,json}`.
+
+    **(ix) What writing this up broke, and the hole it exposed in the doc layer.** The first pass of
+    correcting README's G4 row by hand went red: `tests/test_gates.py`
+    `test_readme_carries_the_generated_block_verbatim` asserts that README lines 75–97 are byte-for-byte
+    `bench/gates.py --readme-block`, so README's gate table is **derived text** and cannot be corrected
+    where it is read. The fix is the generator's own output re-emitted between the markers (done; the
+    only surviving README change from this entry is prose outside the block). The check then points at
+    the real defect: the stale claim this entry corrects lives *inside* `bench/gates.py` —
+    `gate("G4", …)` at line 188 says the 16k decision "needs the 4k truncated-backprop checkpoint,
+    which is 7b / `KAGGLE`", and `readme_block()`'s intro at line 450 says G1 and G4 "are the two that
+    cannot be closed on this box". Both are falsified by a run that closed the compute half on this box.
+    They stay as written: editing the gate table's prose is outside this run's authorised scope, and
+    README cannot carry the correction without it, so README's block and SPEC §2.2 now disagree in
+    words while agreeing in verdict. **(Superseded 2026-10-29: the owner then approved exactly this
+    two-field generator edit — both fields' before/after wording and the four checks are §9.63(xii).
+    The structural finding below is *not* closed by it: no mutant was added over the prose.)**
+    **The structural finding is the one to keep:** all 21 mutants in
+    `bench/mutation_gates.py` target `bench/gates.py`'s checking logic — the row parser, the drift
+    comparison, the verdict read — and none reaches `readme_block()`'s strings, so the generated block
+    is drift-checked and not truth-checked. A sentence in it can go stale exactly the way §9.44's
+    hand-copied counts did, and the suite will stay green while it does. The follow-up is a two-field
+    `GATES` edit plus a `--readme-block` regeneration plus `tests/test_gates.py` (29 tests), and — if
+    the class is to close, a mutant over the intro sentence itself. Suite after the regeneration:
+    **609 passed, 1 skipped in 603.33 s** (`test_upstream.py`'s `KEV_ROOT` skip, unchanged from 61(v)),
+    and `bench/gates.py --check` still prints **7/7 verdicts hold — 3 of 7 met, 3 not met, 1 open — the
+    release gate is NOT clear**.
+
+63. **The other 65 % of the dose was paid for, on the owner's order, and it bought exactly nothing —
+    which converts 7b's open question from "is 1200 enough?" into a measured answer about the
+    mechanism.** PHASE 2's approved run, resumed to completion, 2026-10-28/29. G4's verdict is
+    **not met, measured**; no section here claims it met.
+
+    **(i) What was run.** The owner's answer to the decision 62 opened was the command `start
+    --resume --steps 1200`, executed verbatim as
+    `uv run python -m myna.train --long-context 4096 --grad-tokens 1024 --batch 3 --steps 1200 --lr 6e-4
+    --seed 0 --device auto --save-every 25 --free-gib 9.0 --stop-factor 3.0 --out runs/lc1-4k-s0 --resume`
+    — same approved flags, `--resume` added, nothing else changed. Leg 1 had executed steps 0–424; this
+    leg executed 425–1199, so the **executed dose is 1200 updates = the approved dose**, across two
+    processes joined by 1b's snapshot. Base snapshot (step 424) sha256
+    `d3548a881b9280e04a229ac60b57854d5604572a072cf677d4b5365bd23656dd`; final `model_last.pt`
+    `25b868e9f53660237d584da12066afc8d2b462f9392b8f2afa8d7ae9076674dd`; final `model.pt`
+    `fb37a28b88bea29a0bb871dceb8f7b835b216e8c11a987830a420fb15d39b7e8` — each hashed on the `runs/`
+    side and again on the staged side at copy time, per 7b's staging rule.
+
+    **(ii) `metrics.json` — the first one this path ever wrote.** `"stopped": null` is the field that
+    carries 62(ii)'s claim forward: the loop's own abort record is empty for the whole resumed leg.
+    Also in it, verbatim: `updates_executed` 775, `last_step` 1199, `resumed_from_step` 425,
+    `steps_requested` 1200, `median_s_per_update` 2.0036542415618896, `params` 15353984, `batch` 3 with
+    `batch_requested` 3 (no clamp), `projected_step_gib` 2.4000000000000004 against `mem_plan_free_gib`
+    9.0 at `mem_safety` 0.6, `split` 3072, `grad_window_tokens` 1024, `detached_tokens_p95` 3082,
+    `state_tokens_p95` 4106 with `state_tokens_min` 4096 and `state_tokens_max` 4108 over
+    `p95_sample` 60, `device` mps, `save_every` 25, `stop_factor` 3.0, `temperature` 1.0 and
+    `temperature_fitted` false. The loop printed zero `STOP at step` lines; swap read `used = 0.25M` of
+    `total = 1024.00M` at every check on both legs; no Metal OOM. The leg's own counter: 775 updates in
+    1662 s = 2.144 s/update wall against that 2.0037 median — i.e. the box never slowed enough for the
+    3.0× rule to be near. **Provenance:** the trainer writes `runs/lc1-4k-s0/metrics.json`, which
+    `.gitignore:24`'s `runs/*` does not track — only top-level `runs/*.json` is committed — so the values
+    above are read from the committed copy `runs/lc1_4k_s0.metrics.json` (byte-copied, no absolute paths in
+    it), and the weights behind them (`model.pt` 61,442,325 B, `model_last.pt` 184,355,257 B) are not in
+    the repo at all until an owner-side Release.
+
+    **(iii) Two things the resume is, and one it is not.** It **is** schedule-correct by construction:
+    61(iv)'s `--resume` restores the `CosineAnnealingLR` state, and 62(iv) read `T_max = 1200` off the
+    step-424 snapshot — the LR therefore continued the curve planned for the whole dose instead of
+    restarting a 775-step cosine. Nothing in this leg's log prints the LR itself, so that is what the
+    snapshot witnesses, not what the run measured. It **is not** a replay: the loop
+    re-seeds `random.Random(args.seed)` from `--seed 0`, prints "continuation, not a bit-identical
+    replay", and so the resumed leg draws the **same data order over again**. This caps what "the dose
+    doubled" can mean — see (vi). And the outside kill that ended leg 1 was still not the loop's own
+    `stopped`, so `metrics.json` here describes leg 2's 775 updates and the 1200 figure is the sum of two
+    logs, stated as such in `runs/lc1_4k_s0.stageC_final.log`.
+
+    **(iv) The loss got to chance and sat there.** Logged steps 500 → 1199: loss 1.695, 1.774, 1.756,
+    1.782, 1.776, 1.787, 1.790, 1.796; ema 1.912, 1.806, 1.800, 1.795, 1.794, 1.790, 1.791, **1.791**.
+    A uniform 6-way readout scores `ln(6) = 1.791759469228055`. The step-1199 loss (1.796) is **0.0042
+    nats above** it and the final ema (1.791) is **0.0008 below** it — which is to say that at the third
+    decimal the log prints, the endpoint **is** chance: 62(iii)'s 0.031-nat gap at step 400 had closed to
+    the rounding of the log rather than to a signal, and batch-acc still alternates 0.000 and 0.333 on a
+    batch of 3 rows that share one entity, which is one row right or none. A signed 0.0008-nat deficit
+    against uniform is not something this dose can resolve — 1 s.e. on the accuracy axis is 0.048, and the
+    ladder below is flat at the floor. That is the constant-emitter signature §9.43 already knows, now at
+    the end of a full dose instead of 35 % of one.
+
+    **(v) The ladder, and G4's two named thresholds measured for the first time.** The trainer had
+    exited before this eval, so it ran **unthrottled** — 62(vii)'s throttle was there to protect a live
+    step-time measurement and there was none left to protect. `n=60`, seed 0, `--device cpu`, rungs 128 /
+    1024 / 4096 / 8192 / 16384:
+
+    | tokens | acc | correct/60 | ms/sample |
+    |---|---|---|---|
+    | 128 | 0.150 | 9 | 77.0056068674118 |
+    | 1024 | 0.21666666666666667 | 13 | 745.0751513833287 |
+    | 4096 | 0.18333333333333332 | 11 | 2857.482810466172 |
+    | 8192 | 0.150 | 9 | 5554.869864500142 |
+    | 16384 | 0.150 | 9 | 10989.17304858296 |
+
+    G4 requires **≥ 0.90 at 4k** and **≥ 0.85 at 16k state**. Measured: 4096 → 0.1833 (short by 0.7167),
+    16384 → 0.150 (short by 0.700). **G4: NOT MET, measured** — the first time those two numbers have
+    existed on a 4k-trained checkpoint at all. The harness separately prints `readable: false` because the
+    128-rung (0.150) is not above the 0.167 floor, so this is not a decay curve either; it is a flat line
+    at chance with a slight negative bias. 1 s.e. at n=60 is 0.0481: the largest departure from the floor
+    anywhere on the ladder is the 1024-rung at **1.04 s.e. above it**, so no rung is separable from
+    chance, while the two shortfalls against G4 are **14.9 and 14.55 s.e.** — not noise.
+
+    **(vi) The dose answer, which is the actual content of this entry.** Stage B and Stage C share three
+    rungs. step 799 (throttled): 0.150 (9/60), 0.2167 (13/60), 0.1833 (11/60). step 1199 (unthrottled):
+    0.150 (9/60), 0.2167 (13/60), 0.1833 (11/60). **Identical correct-counts on all three rungs after 400
+    more updates.** Two different checkpoints agreeing exactly on three 60-sample counts is not what a
+    learner still moving looks like — under any real weight change those counts would scatter — and the
+    loss agrees with the ladder rather than arguing with it. So 7b's open question, as 62 wrote it ("does
+    a longer dose reach floor + margin at all?"), is answered **no at this size and this regime**, and the
+    limiter is the mechanism, not the dose. What this does *not* buy is the capacity claim in general:
+    the token yardstick here is genuinely mixed. 1200 updates × batch 3 = **3,600 states**, at ~4106
+    tokens each ≈ 14.78M state tokens, which over 15,353,984 params is **0.96 tokens/param** — 3.4× §6's
+    0.28 pilot ratio. But the pilot's 0.28 came from **57,904 distinct states**; this run has 3,600, and
+    because `--seed 0` re-seeded the sampler it re-saw its own order. Measured on the gradient axis
+    instead, the dose is 1200 × 3 × 1024 = 3,686,400 gradient-carrying tokens = **0.24 tok/param**, just
+    under the pilot. All four of those ratios are **DERIVED** by dividing one measured column by another
+    (counts and `params` from `metrics.json`, the per-row length from `state_tokens_p95`), not measured by
+    any harness. The defensible reading is narrow: at 15.35M cold-started, 4k truncated-backprop
+    needle retrieval collapses to the uniform readout, the collapse is already complete by update 799,
+    and more updates at the same regime do not move it.
+
+    **(vii) The throttle's own price, now that both halves exist.** 62(vii) could only say the latency
+    axis was unmeasurable because the eval was throttled. With the unthrottled ladder in hand, the two
+    schedulings of the same harness on the same box can be compared: 1024-rung 1201.18 ms throttled
+    (step 799) against 745.08 ms unthrottled (step 1199) = **1.61×**, and at 128 the 116.68 ms of the same
+    pair against 77.01 ms = **1.52×**. The checkpoints differ by 400 updates that moved no prediction, so
+    the ratio is schedulings, not models — and it is still a derived quotient, not a measurement of a
+    latency. Against v0's published n=16 cpu column (59.53 / 448.76 / 1760.88 / 3436.48 / 7425.21 ms)
+    the unthrottled rungs give ratios 1.294 / 1.660 / 1.623 / 1.616 / 1.480, while the parameter count
+    ratio is only 1.0626 (15,353,984 vs 14,449,280, `runs/bench_mlx_int8.json`). Sizes do not account for
+    it, so **no latency claim is built on either column pair**; the ms columns are published as the
+    harness's own timings and nothing more.
+
+    **(viii) What was deviated, stated as a deviation.** Three stage boundaries were approved with the
+    rule "abort and report if the 128-rung is below 0.267". That rule fired at Stage A and the run was
+    stopped. Once the owner ordered the run past 425, the same threshold could not govern a run whose
+    accuracy is *on* the floor it is measured against — a rule that aborts a run for sitting at chance
+    would abort it again at every later boundary and the dose question would never be answered. So
+    Stage B (step 799) and Stage C (step 1199) were executed as **observation points**, keeping full
+    machine-abort authority (step-time 3.0× median, free-below-projected, swap > 4 GiB, Metal OOM) and
+    dropping only the accuracy abort. The snapshot-copy-and-rehash obligation was met at both. Also
+    unchanged: 7b's rule "do NOT judge G4 from a stopped run" is why 62 wrote no G4 number at all, and
+    why this entry — describing a **completed** 1200-update dose — is where G4 is finally judged.
+
+    **(ix) Defects in the record itself, left visible.** The stage driver `/tmp/lc1_stage.zsh` calls
+    `/usr/bin/sysctl`, which is not this box's path, so its own swap line prints empty; each witness log
+    therefore re-reads `sysctl -n vm.swapusage` separately and says so. The same script hardcodes the
+    **leg-1** log into its tail step, so the Stage B witness initially reported the cold leg's steps under
+    a resumed heading — corrected in that log's text rather than by rewriting it. And one prose line of
+    the Stage C log was silently swallowed: zsh treated a double-quoted English sentence inside a `{ …; }
+    > file` group as a command, printed `command not found`, and dropped the line — repaired, and the
+    lesson recorded for next time (prose with quotes goes through a heredoc or a Python writer, never
+    through a shell group).
+
+    **(x) The reproducibility gap this entry opened is closed, and the closure is replayed rather than
+    asserted.** As written, this subentry said three things: the ladder's command reads
+    `--ckpt ~/myna-staging/lc1-4k-s0/stageC_final`, the checkpoint is "2 files that no Release carries", and a
+    clean clone therefore cannot re-run it. All three were true the day they were typed, and all three are
+    superseded now — the weights are published and the ladder has been replayed from them, so this entry
+    records the closure instead of leaving the old sentence standing. **The Release** is
+    `lc1-4k-s0-stageC-weights` — id **428002663**, published **2026-10-29T14:53:44Z** on commit `1fb0ceb`,
+    titled "lc1-4k-s0 Stage C weights (1,200 updates at 4k truncated backprop — the n=60 ladder, G4 not met)"
+    — and it carries exactly three assets: `model.pt` 61,442,325 B
+    `fb37a28b88bea29a0bb871dceb8f7b835b216e8c11a987830a420fb15d39b7e8`, `tokenizer.json` 22,096 B
+    `5455c56a7e1ece5e254f04075c4b16d3349dbc5fc8595715726a2e8bae8c4c39`, and a `SHA256SUMS` manifest 156 B
+    `7e0be345d9542e95e837e725b77f2eb1f1929e866aeddc6267710d29240952ad`. `model_last.pt` (184,355,257 B,
+    `25b868e9f53660237d584da12066afc8d2b462f9392b8f2afa8d7ae9076674dd`) was deliberately not uploaded — it
+    carries the Adam moments plus `optimizer`/`scheduler` state, and `docs/release-stageC-draft.md` §3 prices
+    that gap byte for byte. The digests above are the ones GitHub computes server-side for those assets, read
+    back off the API after the upload, not digests this repo asserted about its own files.
+
+    **The replay**, run on 2026-10-29 outside this working tree: a fresh clone at `1fb0ceb`, then
+    `fetch_weights(tag="lc1-4k-s0-stageC-weights")` (`src/myna/weights.py`), both assets hashed against the
+    live `SHA256SUMS` **before any model ran**, then the ladder at n=60, seed 0, `cpu`, five rungs. **All five
+    accuracy cells came back equal at full precision** to `runs/needle_lc1_stageC_final.json` — **0.15 /
+    0.21666666666666667 / 0.18333333333333332 / 0.15 / 0.15** — and `baseline.readable` is `false` on both
+    sides. The replay's own pair is now committed as `runs/needle_lc1_stageC_replay.{md,json}` (copied
+    unmodified out of `/tmp/myna-stageC-replay/`, `cmp`-verified byte-identical on both files; json
+    `fbf306e93e3d59340f0d4ce12ea4b6ce92a3d69f6a12514ec0675da1f47fdf9f`, md
+    `a157f4c804d6b3adacf33100b738aa968e7f796de581d38e41d0aa5d1a5929d5`), and `bench/reproduce.py` binds it as
+    row **`needle-lc1-stageC`** — the deferred row this subentry used to describe as impossible, because its
+    command now carries the fetch instead of a path outside the tree:
+
+    ```bash
+    uv run python bench/eval_needle.py --ckpt "$(uv run python -c 'from myna.weights import fetch_weights; print(fetch_weights(tag="lc1-4k-s0-stageC-weights"))')" --device cpu --n 60 --seed 0 --lengths 128 1024 4096 8192 16384 --out runs/needle_lc1_stageC_replay.md
+    ```
+
+    `myna-weights --tag lc1-4k-s0-stageC-weights --print-path` is the same fetch as a console script, and
+    `myna.report`/`Myna(...)` take the directory it prints. **Three boundaries on the reproducibility claim,
+    stated because a reader cannot assume them.** Only the accuracy column is claimed: `ms` came back 99.40 /
+    838.80 / 2912.57 / 5222.39 / 10325.83 against the witness's 77.01 / 745.08 / 2857.48 / 5554.87 / 10989.17
+    and was never compared — §9.23 makes those absolutes load-dependent, which is why the row quotes
+    accuracies and not milliseconds. The replay ran **on the same laptop as the original**, so it proves the
+    clone-and-Release path yields the witnessed cells; it is not a cross-machine determinism test. And the
+    interpreter was this project's existing virtualenv (torch 2.14.0, python 3.13.14) rather than a fresh
+    dependency install — the clone's own `src/myna` was proven to be the copy answering (`myna.__file__`
+    pointed inside the clone), but a clean-environment install stays open.
+
+    **What the row does not do is change a verdict.** G4 remains **not met** — 0.1833 at 4096 against ≥ 0.90,
+    0.150 at 16384 against ≥ 0.85 — and `runs/needle_lc1_stageC_final.json` is still not itself a registry
+    witness, so (xi)'s sentence about the three stage artifacts stands. Publishing settled a logistics
+    question (who can re-run the ladder: now anyone with the tag), not the scientific one §9.63 leaves open.
+
+    **(xi) Verification on the tree this entry leaves.** `bench/gates.py --check` → **7/7 verdicts hold —
+    3 of 7 met, 3 not met, 1 open — the release gate is NOT clear**, with G4 still `not met` read from a
+    witness that prints `readable: false` — the check reads that field out of `runs/needle_myna-v0.json`,
+    which is still the gate's bound proof; three further artifacts with the same `readable: false` now sit
+    beside it in the repo (stageA, stageB_resume, stageC_final), and none of them is a proof or a registry
+    row yet (see (x)). §2.2's G4 row and §5's 7b and P8-release-gate lines are updated to the completed
+    dose;
+    `bench/gates.py:188` and `:450` still said the 16k decision "needs … `KAGGLE`" and that G1/G4 "cannot
+    be closed on this box" as this entry was written — 62(ix) records why they stayed for that one step.
+    They were corrected on the owner's order the next day; that edit is (xii). Writing
+    (v) found a smaller class of the same defect in README's *prose*: it quoted
+    "`G4: NOT MEASURED here`" and "its `G4: NOT MEASURED` line" as what `runs/needle_myna-v0.md` prints,
+    but the harness prints **two different strings** — `bench/eval_needle.py:87` puts the stdout form on
+    the terminal and `:107` writes `G4: **not measured by this run**` into the file — so the doc credited
+    the terminal's words to the artifact. Both places now quote the file's own text, which is the only
+    version a reader who opens the witness can verify. **Nothing
+    was pushed, tagged, released, or submitted, and Phase 3 was not started.**
+
+    **(xii) The two-field generator edit the owner then approved — code and regeneration only.** The
+    instruction was to edit nothing else in the generator, so the gate table's *structure*, its `rows`,
+    its `proofs` and every other gate's prose are untouched: `GATES` is still seven entries and the G4
+    proof is still `runs/needle_myna-v0.json`'s `baseline/readable == False`.
+
+    | field | before | after |
+    |---|---|---|
+    | `gate("G4", …)`'s not-claim cell, `bench/gates.py:198-201` | "not met, and not met by a run that cannot answer the question. The 16k *state* is measured, fixed at 576 KiB and cheap (§9.22); the 16k **decision** needs the 4k truncated-backprop checkpoint, which is 7b / `KAGGLE`. Those are two different claims and only the first one is settled." | "not met, and no longer a run that has not happened. … the 16k *decision* has now been measured on this box too — the 4k truncated-backprop checkpoint ran its approved 1200-update dose on the M5 and prints **0.183 at 4096 and 0.150 at 16384** against these two thresholds (§9.63, `runs/needle_lc1_stageC_final.json`; not a registry row yet, because those weights live outside the repo). So the `KAGGLE` label on 7b was stale and neither half of this gate is a compute question. What is not settled is the mechanism: the ladder at 799 and at 1199 updates is identical on every shared rung, so another dose at this regime is not the next experiment." |
+    | `readme_block()`'s intro, `bench/gates.py:448-450` | "… The gate that decides whether this is a product (G1) and the gate that decides what it can read (G4) are the two that cannot be closed on this box." | "… Both of the gates a reader might have expected to be waiting on hardware are measured here: G4's 4k run executed on this laptop (§9.63), and G1's checkpoint has its own report committed in `runs/`. Neither is `open` — G1 stays short of 0.70, and its remaining lever carries a GPU price §9.38 writes down, while G4's shortfall is a mechanism question and not a compute one." |
+
+    **README's block was regenerated, not edited**: `/tmp/regen_readme_block.py` split README on the two
+    marker comments, spliced in `bench/gates.py --readme-block`'s own stdout, and asserted before writing
+    that the block appears verbatim, that exactly one marker pair survives, and that the prose on both
+    sides of the span is byte-identical (3,860 B before, 45,705 B after). The block's inner text grew 5,999
+    → 6,653 chars, and `git diff` shows the only README changes are those two passages.
+
+    **Four checks, all green on the final tree:** `bench/gates.py --check` → 7/7 verdicts hold, 3 met /
+    3 not met / 1 open, release gate NOT clear; `bench/reproduce.py --check` → 34/34 rows, 101 figures tied
+    to a committed witness, 1 gated; `tests/test_gates.py` + `tests/test_reproduce.py` → **67 passed**
+    (48.73 s on that run). Only the count is pinned, not the wall time: SPEC is one of the four docs both
+    checks read, so this subentry is itself a doc edit that supersedes the run quoted above it — the final
+    re-run after it is what the commit rests on. `bench/mutation_gates.py` was **not** re-run (it is a 344 s battery and the owner's four
+    checks did not include it), so instead its anchors were checked directly: all **21 of 21** mutant
+    `old` strings are still present in the edited `bench/gates.py`, which is the assertion that matters
+    after a prose edit — a mutant whose anchor no longer exists is a silent pass. **The class 62(ix)
+    named is still open:** no mutant was added over `readme_block()`'s prose, so this corrected sentence
+    can go stale again exactly as the last one did, and the suite will not notice.
+
+64. **Three parameter counts are live in this repo's artifacts and one expression defines all three; the
+    Phase 3 outline put the wrong one on the accuracy arm, and its G4 table had two cells filled from the
+    wrong stage. This entry commits the definitions, the stage-by-stage ladder and the dose denominators
+    exactly as they were verified against the witnesses.** No number appears here that was not read out of
+    a committed artifact or recomputed from a checkpoint on disk in the same step, and **no witness file
+    was edited to agree with an outline** — where the two disagreed, the outline was wrong and is
+    corrected below. The disagreement was in a reply, not in the repo: 63(v) and 62(iv) already printed
+    the right ladders, so the only tracked change this entry makes is the record.
+
+    **(i) The count is one expression, and it counts every parameter the model object has.** All three
+    figures come from `sum(p.numel() for p in self.model.parameters())` at
+    `src/myna/engine.py:158-159` — total parameters, embedding table included, not trainable-only, not
+    non-embedding, and *not* a quantized count. Measured on the lc1 checkpoint: **90** named tensors,
+    every one `requires_grad=True`, and **0** elements in buffers, so there is one set of tensors and no
+    frozen module to argue about. Because each is built from its own checkpoint's `cfg`, the count is a
+    property of the config, not of the harness.
+
+    | count | vocab | checkpoint it belongs to | what claims it in this repo |
+    |---|---|---|---|
+    | **14,449,280** | 1740 | `runs/myna-v0` — the shipped artifact, and the model the browser build is exported from | `runs/train-v0.log:5` (`params: 14449280`), printed by `src/myna/train.py:1020`; `runs/bench_mlx_int8.json`'s `n_params`, read from `myna.n_params` at `bench/bench_mlx.py:211` and written at `:317`; `runs/onnx/meta.json` (`"ckpt": "runs/myna-v0"`, `"vocab": 1740`, `"params_m": 14.45`) |
+    | **15,353,984** | 4096 (the default `MynaConfig`) | `lc1-4k-s0`, the long-context arm — the checkpoint whose `model_last.pt` lives outside the repo | `runs/lc1_4k_s0.train.log:4` (`long-context: state=4096 grad=1024 params=15353984`), `runs/lc1_4k_s0.metrics.json` (`params`), and `params_m: 15.35` in all three `runs/needle_lc1_stage*.json` (`bench/eval_needle.py:115`) |
+    | **16,926,848** | 8192 (the suite's `tokenizer-8192.json`) | `runs/v1b-kaggle-3600b` — the checkpoint **every G1 accuracy figure in §2.2 is scored on**, and the same config as the Tier 0 and anti-prior arms | `runs/antiprior_on_s0c.train.log:10`, `runs/myna_v1_accum.log:5`, `runs/diag_question_ablation.log:2`; asserted as a literal at `tests/test_diag_question_ablation.py:1314`; `bench/reproduce.py:539` calls the G1 arm "step 3599, 16.9M params" |
+
+    The three close arithmetically with one variable. On the lc1 checkpoint the only tensor above 1M is
+    `trunk.tok.weight` = vocab × `d_model` 384, and `d_model` 384 / 6 layers are identical across all
+    three configs (each read back out of its own `cfg`):
+    14,449,280 + (4096 − 1740) × 384 = 14,449,280 + 904,704 = **15,353,984**, and 15,353,984 +
+    (8192 − 4096) × 384 = 15,353,984 + 1,572,864 = **16,926,848**. So the counts differ by the embedding
+    table and by nothing else, and any sentence that treats them as three architectures is wrong.
+
+    **(ii) The int8 label was wrong and is corrected: 14,449,280 is a pre-quantization count.**
+    `runs/bench_mlx_int8.json` reports the *torch* model's `n_params` — `Myna(ckpt_dir)` is constructed at
+    `bench/bench_mlx.py:209-211` and `n_params` is read off it before either MLX engine exists, the fp32
+    and int8 engines being built separately at `:214`. The quantization facts in that file are bytes:
+    int8 `file_bytes` **18,248,977**, fp32 **57,805,835**. The cross-check that the count is a total-param
+    count and not a quantized one: 14,449,280 × 4 = 57,797,120, which is the fp32 file to within its
+    container overhead.
+
+    **(iii) The reproduced numbers, and which of them a clone can reach.** All three were recomputed in
+    this step by constructing `Myna` from each checkpoint directory on this laptop — `runs/myna-v0`,
+    `runs/v1b-kaggle-3600b` and `~/myna-staging/lc1-4k-s0/stageC_final` — and each printed exactly the
+    count in the table above, so none of the three is an estimate. No checkpoint is in the tree: all
+    three live under the `runs/*` line `.gitignore:24` keeps. Two of them have a documented fetch —
+    `src/myna/weights.py` pulls a GitHub Release by tag (`DEFAULT_TAG = "antiprior_off_s0-weights"`,
+    `src/myna/weights.py:38`), and README names `v1b-checkpoint` as "the 0.4893 Kaggle run" among the
+    published arms — while the 4k checkpoint that produced 15,353,984 exists only in `~/myna-staging/`,
+    which is 63(x)'s gap: a clone cannot reproduce that count, or the ladder it measured, until the
+    task #28 Release ships those weights.
+
+    **(iv) The stage ladder, cell by cell against the three `needle_lc1_stage*.{md,json}` witnesses and
+    the three stage logs** — which is also the correction of two cells the outline had wrong, and it had
+    them wrong *backwards*: Stage A **did** measure the 1024 rung (the outline left it blank), and Stage B
+    **never** measured 8192 or 16384 (the outline carried Stage C's values into its row). A rung absent
+    from a JSON's `lengths` list is now written as *not evaluated at this stage* and never inferred.
+
+    | leg | checkpoint evaluated | boundary status | n / seed / device | 128 | 1024 | 4096 | 8192 | 16384 |
+    |---|---|---|---|---|---|---|---|---|
+    | Stage A (leg 1, cold) | step-399 snapshot `model_last.pt` sha256 `f389bde5…`, reconstructed into a `model.pt` ladder-loadable dir; the leg had executed **425** updates and its last save was step 424 | **gated abort point** — Condition 3's "abort and report if the 128-rung is below 0.267" fired at 0.1667, which *is* the floor (`chance + margin = 0.2667`) | 60 / 0 / `cpu`, **throttled** `OMP_NUM_THREADS=2 nice -n 15` (62 vii) | **0.16666666666666666** (10/60) | **0.21666666666666667** (13/60) | not evaluated at this stage | not evaluated | not evaluated |
+    | Stage B (leg 2, resumed) | step-799 snapshot sha256 `a2bbc2eb…`, resumed from step-424 `d3548a88…` | **observation point** — 63(viii): the 0.267 rule cannot govern a run ordered past a floor it is sitting on; abort authority was the machine rules only | 60 / 0 / `cpu`, **throttled** (`runs/lc1_4k_s0.stageB_resume.log:20`) | **0.150** (9/60) | **0.21666666666666667** (13/60) | **0.18333333333333332** (11/60) | not evaluated at this stage | not evaluated |
+    | Stage C (leg 2, final) | step-1199 `model_last.pt` sha256 `25b868e9…`, `model.pt` `fb37a28b…`; `steps_requested` 1200, `last_step` 1199, 425 + 775 = **1200 executed** | **observation point**, no machine abort (STOP lines 0; swap 0.25M of 1024.00M at every reading) | 60 / 0 / `cpu`, **unthrottled** — the trainer had exited (63 v) | **0.150** (9/60) | **0.21666666666666667** (13/60) | **0.18333333333333332** (11/60) | **0.150** (9/60) | **0.150** (9/60) |
+
+    Witnesses, in that row order: `runs/needle_lc1_stageA.{md,json}` + `runs/lc1_4k_s0.stageA.log`;
+    `runs/needle_lc1_stageB_resume.{md,json}` + `runs/lc1_4k_s0.stageB_resume.log`;
+    `runs/needle_lc1_stageC_final.{md,json}` + `runs/lc1_4k_s0.stageC_final.log`. The `lengths` fields are
+    what set the blanks — `[128, 1024]`, `[128, 1024, 4096]`, `[128, 1024, 4096, 8192, 16384]`
+    respectively — and all three print `readable: false`, which is why the 16k *decision* is stated
+    against G4's thresholds on Stage C alone. Two invariants worth pinning: `temperature` is recorded
+    (1.0) and never applied to the score **in this harness** (`bench/eval_needle.py:116`), so it cannot
+    differ a rung between stages — the scope of that sentence is the needle ladder's own scoring path, and
+    nothing more. It is not a claim about the engine's inference temperature, which is a separate, fitted
+    scalar that does divide the logits at inference (`src/myna/engine.py:208`, fitted by the 8-point NLL
+    grid at `src/myna/train.py:532-537`; the paper draft's §10 documents that path). Different code path,
+    different checkpoint: the two statements are not in contradiction and neither one restates the other;
+    the `ms` columns **do** differ by scheduling, which is 63(vii)'s 1.61× throttle price, so no
+    row of this table may be quoted on the latency axis.
+
+    **(v) The dose arithmetic, with its denominator printed at every step** — 63(vi) wrote the ratios but
+    not the divisor, which is how the count in (i) became load-bearing:
+
+    - state-token basis: 1200 updates × batch 3 = **3,600 states**; the run's own
+      `state_tokens_p95` is **4106** (`runs/lc1_4k_s0.metrics.json`), so 3,600 × 4106 = **14,781,600**
+      state tokens, and 14,781,600 ÷ **15,353,984** = **0.9627 → 0.96 tok/param**.
+    - gradient basis: 1200 × 3 × 1024 `grad_tokens` = **3,686,400** gradient-carrying tokens, and
+      3,686,400 ÷ **15,353,984** = **0.2401 → 0.24 tok/param**.
+    - the §6 pilot yardstick, whose denominator §6 leaves unstated: 4,246,106 ÷ **15,353,984** =
+      **0.2765 → 0.28**. That is the only one of the three counts in (i) that reproduces the published
+      0.28 — against 14,449,280 it is 0.2939 and against 16,926,848 it is 0.2509 — so 63(vi)'s "3.4×"
+      comparison is one denominator used both ways (0.9627 ÷ 0.2765 = 3.48), and §6's sentence is
+      arithmetically right while being silently under-specified.
+
+    **(vi) Both sentences this entry deferred were edited in commit `fd5f138`.** `SPEC.md:1669` — that §8
+    risk-table row, whose line has since moved to `SPEC.md:1680` as the edits around it grew the file — now
+    names the 16,926,848 /
+    vocab 8192 arm (`runs/v1b-kaggle-3600b`) that G1 was actually scored on instead of the default
+    `MynaConfig` count nobody was scored on, and §6's **0.28 tokens/param** now prints 4,246,106 ÷
+    **15,353,984** = **0.2765** with the other two counts beside it (0.2939 at 14,449,280, 0.2509 at
+    16,926,848). So this subpart records the edits rather than deferring them, and §9.64 (v)'s derivation
+    remains the witness for the arithmetic.
+
+    **(vii) Verification on the tree this entry leaves.** `bench/gates.py --check` → **7/7 verdicts hold —
+    3 of 7 met, 3 not met, 1 open — the release gate is NOT clear**; `bench/reproduce.py --check` →
+    **34/34 rows hold; 101 figures tied to a committed witness, 1 gated with no witness**. No gate, row,
+    proof or verdict moved, and this entry touches `SPEC.md` alone — `git status` after it lists no other
+    file, which is the witness that none of the three `needle_lc1_stage*.{md,json}` pairs or any stage log
+    was edited to agree with a claim. **Nothing was pushed, tagged, released, or submitted; Phase 3
+    drafting was not started; the Stage C Release shipping remains an owner decision.**
+
+65. **G6 was the last `open` verdict in the table, and it closed under a measurement rather than a
+    decision: the synthetic split now has a harness that scores any checkpoint, `v1b-kaggle-3600b`
+    fails the 0.94 level the gate was written at, and the thing that makes the number mean something
+    is a hash the harness prints rather than a sentence in the prose.** Every figure below is read
+    out of one of the four committed witness pairs
+    (`runs/g6_v0_synthetic_s{0,1}.{md,json}`, `runs/g6_v1b_synthetic_s{0,1}.{md,json}`), and no
+    witness was edited after it was written.
+
+    **(i) Why the gate could not be run at all until this tick.** G6's level came from
+    `runs/train-v0.log`, whose nine `=== test ===` rows recompute to **0.9523** — a figure that
+    §9.30 already disqualifies as a *reproducible* set, because the log prints no command, no seed
+    and no row count (the `cmd:` print landed later, in `240cad5`), the weight initialiser was
+    unseeded before `0b66ab9`, and `src/myna/data.py` changed on 2026-09-26 (`3e87a8b`, `7f66243`).
+    Worse, no harness in `bench/` could score a checkpoint on the synthetic split at all:
+    `bench/eval_scratch.py` and `myna.report` read the real `decision-v2` suite and
+    `bench/eval_needle.py` reads the needle task. So the gate sat with a level and no instrument,
+    which is the one shape `open` is allowed to have — and the one shape a reader cannot audit.
+
+    **(ii) The instrument, and the identity of the split it scores.** `bench/eval_synthetic.py`
+    loads a checkpoint's `model.pt` *and the `tokenizer.json` beside it*, rebuilds the trainer's own
+    split recipe (`torch.manual_seed`, then one `random.Random` walking `WORKFLOWS` in literal order
+    for train, dev and test — `src/myna/train.py:995-1006`), scores the test split through
+    `myna.train.evaluate()` — the function that printed v0's nine rows, so the basis matches the
+    artifact — and prints the two floors of those rows from `myna.report.cell_stats`, the same
+    definition the G1 cells use. Four details are load-bearing rather than incidental:
+    all four arms score at `temperature` 1.0, the value every one of these witnesses prints, because
+    a positive logit scale cannot move an argmax — so this level test is not a temperature choice and
+    no checkpoint's fitted scalar enters it;
+    `--n-train` is part of the measurement's identity because it sets where in the RNG stream `test`
+    begins; the split is *not* stored on disk anywhere, which is why the harness hashes the rows it
+    is about to score and writes the digest into both witnesses; and the vocab guard
+    (`bench/eval_synthetic.py:137-140`, the rule `bench/eval_scratch.py:82-85` already applies)
+    refuses a checkpoint whose `cfg.vocab` disagrees with its tokenizer instead of re-tokenizing the
+    corpus with something else. The deciding command is the row `g6-synthetic-v1b` publishes:
+
+    ```bash
+    uv run python bench/eval_synthetic.py --ckpt runs/v1b-kaggle-3600b --device cpu --seed 0 --n-train 4000 --n-eval 1200 --out runs/g6_v1b_synthetic_s0.md
+    ```
+
+    The baseline arm is the same line with `--ckpt runs/myna-v0`, and both are repeated at
+    `--seed 1`, because one random draw is a sample and not a property — the rule `bench/eval_scratch.py`
+    already holds itself to. Four pairs, each carrying its own `cmd`.
+
+    **(iii) The checkpoint, verified before it was scored.** `v1b-kaggle-3600b` is the artifact every
+    §2.2 G1 figure is scored on, and it is hash-verified rather than assumed: `model.pt` is
+    67,734,997 B with sha256
+    `0e73a8f07edc87d88a2e8e6f740dc9c5ac248e16459c152e5e5ccff312bb7000` and `tokenizer.json` is
+    526,662 B with sha256
+    `0252c24627eeebc2df5a577576c1c8b24e402da015c1d45519e7e1d8541ffdc3` — both re-hashed in this step
+    against the digests GitHub computed for the assets of Release `v1b-checkpoint` (id **400663670**,
+    published 2026-10-01T05:03:03Z), where they match byte-for-byte. No download was needed, which
+    matters on a 50 GB/day link. The baseline `runs/myna-v0` is vocab 1740 / 14,449,280 params,
+    `model.pt` sha256 `88c14ef2851e028a6d9c41a2a273fcfcd52e2f1d28f2180e3662d567197c880e`.
+
+    **(iv) The four measured arms, with their floors.** All four ran on `cpu`, one at a time, and the
+    load average each one saw is in its own witness:
+
+    | arm | seed | `test_split_sha256` | MACRO | dev | uniform floor | majority floor | G6 at 0.94 |
+    |---|---|---|---|---|---|---|---|
+    | `runs/myna-v0` | 0 | `998d7375…` | **0.9525** | 0.9591 | 0.3370 | 0.3546 | met |
+    | `runs/myna-v0` | 1 | `fc9cbe3b…` | **0.9496** | 0.9588 | 0.3370 | 0.3463 | met |
+    | `runs/v1b-kaggle-3600b` | 0 | `998d7375…` | **0.3423** | 0.3446 | 0.3370 | 0.3546 | NOT met |
+    | `runs/v1b-kaggle-3600b` | 1 | `fc9cbe3b…` | **0.3489** | 0.3501 | 0.3370 | 0.3463 | NOT met |
+
+    The pairing is the row that matters: each seed's two arms print the *same* digest, so the gap
+    0.9525 − 0.3423 = **0.6102** (and 0.9496 − 0.3489 = **0.6007**) is a difference in weights and
+    nothing else. Means over the two seeds: v0 **0.9511** (spread 0.0029), v1b **0.3456** (spread
+    0.0066); v1b is +0.0053 and +0.0119 over the chance floor of its two seeds, and −0.0123 / +0.0026
+    against their modal-label floors. Cell-level, from the same witnesses: v0 clears the majority
+    floor on all 9 cells at both seeds; v1b clears it on 3 of 9 at seed 0 and 5 of 9 at seed 1, and
+    drops *below chance* on 4 cells at seed 0 (`incident/page_oncall`, `moderation/category`,
+    `support/churn_risk`, `support/department`) and 3 at seed 1. The floor macro is identical across
+    seeds for the uniform column (0.3370 = the mean of 1/|options| over the nine cells, whose option
+    counts in the sorted order the report prints are 2/4/4/3/4/2/2/5/4) and moves in the majority
+    column, which is the label prior of the draw, not a
+    property of the model. **G6 is not met at 0.3423 on the deciding arm.**
+
+    **(v) Which reading the artifacts support, and the flattering word this entry refuses.** The
+    gate says "no regression", and a regression is something lost. `v1b-kaggle-3600b` trained on the
+    real `decision-v2` suite and never saw one synthetic row — the same is true of the anti-prior
+    pair — so what is measured here is **zero-shot retention of the task family**, not decay of a
+    trained capability. Both readings fail the same level, so the verdict is unaffected; the
+    *mechanism* claim is not, and this entry makes the weaker one: the checkpoint cannot do the
+    synthetic task without having been trained on it, and 4 of 9 cells below chance says the failure
+    is not merely an uninformative head. Not settled, and not claimed: whether the cause is the
+    instruction/cue vocabulary (`myna.data`'s cue templates are nothing like kev's noul criteria),
+    the 8192-entry tokenizer, or the head. Nor run: `runs/lc1-4k-s0`, which the vocab guard refuses —
+    its `model.pt` declares 4096 embeddings while its `tokenizer.json` holds 522 entries — so the
+    4k checkpoint is *not* a second v1 data point on this gate yet, and the guard is why nobody
+    quietly scored it with the wrong vocab. (A draft of this sentence had "525"; the refusal the
+    harness actually prints names 522, and the artifact's number is the one kept.) One coincidence
+    to name rather than lean on: v0's fresh
+    two-seed mean **0.9511** is digits away from the "0.951" §9.30 buried. It is not that figure
+    resurrected — it is a different split, scored by a committed harness on committed rows, and the
+    log's 0.9523 stays out of every binding in this table.
+
+    **(vi) What moved, and the four checks on the tree this entry leaves.** One gate verdict
+    (`open` → `not met`, with two proofs now reading `g6/met == false` out of the two v1b witnesses),
+    one registry row (`g6-synthetic-v1b`, `HERE`, 8 witness files, 14 quoted figures) → **36 registry
+    rows, 122 quoted figures, 24 rows re-run on this box**, and SPEC §2.2's hand-copied G7 cell and
+    the two live tally sentences re-synced to **3 met / 4 not met / 0 open**. README's two generated
+    blocks were regenerated from `bench/gates.py --readme-block` and `reproduce.readme_block()`, not
+    edited. `docs/paper-draft.md` moved with the verdict, not ahead of it: its abstract, its §2 scope
+    sentence, its §9 check prints and its §10 G6 paragraph now carry the measured pair — 0.9525 / 0.9496
+    against 0.3423 / 0.3489 on the same split digests — while the §9 replay paragraph keeps **3 met /
+    3 not met / 1 open** as what the check printed on 2026-10-29 rather than deleting it.
+    `tests/test_gates.py`'s tally assertion moved with it, and its `open`-branch test now
+    exercises the rule on a copy of G6 — with no `open` gate left in the table, an unexercised branch
+    would silently stop being caught by `bench/mutation_gates.py`'s 21st mutant. The coverage
+    assertion in `tests/test_reproduce.py` moves 28 → 29. Historical records that name the old tally
+    (§9.x ticks, TODO 8d's tick, `docs/release-stageC-draft.md`, `docs/RELEASE-v0.1.0-notes.md`) are
+    left as dated records and listed in the commit report rather than rewritten. **Nothing was pushed,
+    merged, tagged, released, or submitted.**
+
+66. **Every headline accuracy in this repo was a point estimate, and the pre-registered rule that
+    decides a sentence now has an interval to decide it against — which rewrote two of the four claims
+    the first time it ran, on a competitor column that had never been paired, and with the row rather
+    than the question as the unit.** All figures below are read out of three committed witnesses
+    (`runs/myna_v1b_test.rowoutcomes.json`, `runs/laya_0419_test.rowoutcomes.json`,
+    `runs/significance.{json,md}`), none edited after it was written, and each is now a registry row
+    whose command this section prints:
+
+    ```bash
+    uv run python bench/row_outcomes.py --out runs/myna_v1b_test.rowoutcomes.json
+    PYTHONPATH="<laya 0.4.19 checkout>" "<laya venv>/bin/python" bench/eval_laya_row_outcomes.py --out runs/laya_0419_test.rowoutcomes.json
+    uv run python bench/significance.py --myna runs/myna_v1b_test.rowoutcomes.json --laya runs/laya_0419_test.rowoutcomes.json --B 20000 --seed 20261031 --out runs/significance.json --md runs/significance.md
+    ```
+
+    **(i) What was missing was not a test but a unit.** `runs/v1b_kaggle_3600b.report.json` collapses
+    1,440 question outcomes into 16 cell accuracies and then into four numbers, and a mean cannot be
+    resampled: there is nothing in a `0.4893` for a bootstrap to draw. So `bench/row_outcomes.py`
+    manufactures the input rather than deciding anything — it calls
+    `diag_question_ablation.score()`, the chunk-64 loop that already reproduced all 716 committed
+    per-set accuracies with 0 tie flips (§9.48), keeps every row's predictions, and **refuses to write**
+    unless `myna.report.cell_stats` / `accuracy_cells` / `roll_up` re-price all 16 cells of the
+    committed report key for key under that harness's own float tolerance (the witness prints
+    `"tie_flips": 0` and `"ok": true` in its `guard` block). A dump whose guard fails would be worse
+    than no dump, because it would look like the published measurement.
+
+    **(ii) The cluster key is load-bearing, and the witness prints the geometry that proves it.**
+    `load_split` throws `_meta` away — an `Example` is `(state, workflow, gold)` — so the join is
+    recovered by calling the loader's own `parse_questions` and `_signature` and then refusing to
+    continue unless every group's row count matches. The key a row-clustered resample needs is
+    `_meta.id`, unique over 1,176/1,176; `_meta.row` collides on **316** of these rows and
+    `_meta.row_sha256` on **219**, so clustering on either of those two would merge rows that are not
+    the same row and shrink the resample from underneath the interval. All three distinct-counts are
+    written beside each other in `cluster_key_check` (`"distinct_ids": 1176`, `"distinct_row": 860`,
+    `"distinct_row_sha256": 957`) precisely so a reader can check which field is the key instead of
+    being told.
+
+    **(iii) The competitor column had never been paired, and re-measuring it moved the headline by
+    4.2 ten-thousandths while changing what it means.** The published `0.6668` is
+    `runs/v1b_kaggle_3600b.report.json`'s `macro.both.laya` = `0.6668154761904762`, read from
+    `runs/laya_decision_v2_test.json` — a `n_per_source: 40, seed: 0` draw whose 17 cell rows sum to
+    **546 questions**, scored against myna's `0.4893271976084137` from **all 1,176 rows
+    and 1,440 questions**. Two samples of the same 16 cells are not a paired comparison; the gap that
+    prose quotes (`−0.1774882785820625`) is the difference of two macros computed on different rows.
+    `bench/eval_laya_row_outcomes.py` re-runs laya **0.4.19 at commit
+    `55a19f7b7b56787e1a3e41063def9bb9a8737351`** over myna's exact geometry — same `_meta.id`s, same
+    questions, `1,176` rows written with `1,440` outcomes and `"errors": []`, its progress log printing
+    1,100 rows at 277 s and **0 unanswered** — and the paired re-measure is laya
+    `0.6663989223833249`, gap `−0.17707172477491112`. So: the sentence "laya is ahead by about 0.177"
+    survives its own re-measurement almost untouched, and is now honest, because it is one sample and
+    not two. laya's *confidence* still cannot be compared — its own loader warns that this checkpoint
+    ships values outside its `[0.5, 5]` clamp, recorded verbatim in `laya_warnings` — so only
+    correctness is compared. What that re-measure also settles is the version pin: the competitor row
+    this spec and `docs/paper-draft.md` printed for a year was laya **0.3.20 at `55cf4c4e…`**, which is
+    the snapshot `runs/latency_matched.json` measured (`laya_version`, `laya_params` 421,293,827) and the
+    only snapshot whose *latency* is witnessed here. The *accuracy* row now prints 0.4.19 at
+    `55a19f7b…` with the paired number, and the two pins are kept separate rather than silently
+    unified (§9.66 iii).
+
+    **(iv) The interval is around the published number, or the run does not write.**
+    `bench/significance.py` packs each row into one vector of per-cell sums (myna counts and hits,
+    laya counts and hits, the row-weighted `Σ 1/K` for the uniform floor, and the gold-index histogram
+    for the majority floor) in float64, and `boot()` draws `B = 20,000` integer multinomial weight rows
+    over `N = 1,176` in float32 blocks of 1,000 — `rng.multinomial(N, [1/N]*N)`, so a replicate contains
+    whole rows and a row's questions never separate. **The floors are recomputed inside every
+    replicate**, which is the difference between an interval on G1's margin and an interval on myna's
+    macro with a constant subtracted. Before anything is drawn, `main()` refuses with exit 3 unless
+    macro, both floors and `g1.margin_observed` agree with the committed report to **1e-9**, and refuses
+    again unless the paired row set is the whole published split (a smaller set needs
+    `--allow-subset`, which waives the pairing guard and *not* the statistic guard). The run printed
+    `point: myna 0.4893 · floor 0.4331 · laya 0.6664 · gap -0.1771 · macro, both floors and G1's margin
+    match v1b_kaggle_3600b.report.json to 1e-9`, drew in **1.3 s**, kept **16 of 16 cells in every
+    replicate** (`cells_kept_min = cells_kept_max = 16`, so no replicate is quietly a 15-cell macro),
+    and pinned itself with first-replicate digest `d45e5c018ee550da`.
+
+    | statistic | point | 95% CI | |
+    |---|---|---|---|
+    | `myna_macro` | 0.4893 | [0.4647, 0.5139] | G1's level |
+    | `majority_floor` | 0.4331 | [0.4270, 0.4647] | per-cell constant predictor, recomputed per replicate |
+    | `uniform_floor` | 0.3321 | [0.3313, 0.3330] | 1/options, row-weighted |
+    | `margin_over_floor` | 0.0563 | **[0.0192, 0.0676]** | what G1's second half is judged on |
+    | `laya_macro` | 0.6664 | [0.6439, 0.6888] | same cells, same rows |
+    | `gap_myna_minus_laya` | −0.1771 | **[−0.2080, −0.1463]** | per-replicate difference, not two intervals subtracted |
+
+    **(v) The pre-registered rule adjudicated its own first run, and the two sentences it rewrote are
+    the two about G1.** The rule was fixed before the intervals existed: *an interval that covers the
+    threshold forces the sentence to be rewritten in the same change, and a verdict that moves a gate is
+    escalated rather than edited here.* Four sentences, four verdicts, all printed by the harness:
+
+    * **stands** — "myna's test-split macro is above its own majority floor": margin 0.0563
+      [0.0192, 0.0676], CI excludes 0. McNemar without a resample agrees: 291 in myna's favour against
+      196 for the cells' own majority label, `n = 487`, exact two-sided **p = 1.94e-05**.
+    * **rewritten** — "the margin over the floor reaches G1's +0.15": the interval's lower bound is
+      0.0192, not 0.15, and its *upper* bound is 0.0676, so the deficit is not a sampling artefact
+      waiting to be averaged away.
+    * **rewritten** — "the macro reaches G1's target of 0.70": [0.4647, 0.5139] excludes 0.70 entirely.
+    * **stands** — "laya's macro is above myna's on the same rows and cells": gap CI
+      [−0.2080, −0.1463] excludes 0 on the negative side, pooled McNemar 158 myna-only against 436
+      laya-only over `n = 594`, **p = 4.75e-31**.
+
+    **No gate verdict moved, and that is the escalation clause working rather than being cited.** G1 was
+    already `not met` on the point estimate, so an interval that also misses 0.70 and +0.15 changes the
+    *strength* of the prose, not the table: §2.2's G1 row, `bench/gates.py`'s verdicts and
+    `make gates`' **3 met / 4 not met / 0 open** are exactly what §9.65 left them at. What did have to
+    change is the paper: a claim of the form "the margin is +0.0563" is now four numbers — point, two
+    bounds, and the floor's own sampling error — and the sentence that read the 0.6668 as paired is gone.
+
+    **(vi) The one cell that goes the other way, and what no interval here licenses.** Across the 16
+    paired cells the per-cell gaps are negative in **15** of them; the exception is `imdb/positive`,
+    myna **0.8000** against laya **0.4625**, Δ **+0.3375** with CI [0.2237, 0.4545] and McNemar
+    p = 4.63e-07 — the single cell where this checkpoint beats the 421M-parameter competitor on the same
+    rows, and the cell the Tier 0 ablation (§9.47) already flagged as one of the **eight** cells whose
+    accuracy moves when their row's state is swapped — 0.800 as scored against 0.525 under `swap-state`,
+    the second-largest state delta of the 16 behind `dbpedia14/category`'s 0.457 → 0.069. At the other end `agnews/topic` is −0.5431 [−0.6387, −0.4444]. One interval does not buy a
+    generalisation: these 1,176 rows are a fixed draw, the interval is the sampling error of *this*
+    split, and a second training run of the same 3,600-update dose is a different sampling layer that
+    would need its own checkpoint — which this box has not produced. The claim licensed is about a
+    checkpoint on rows; the claim not licensed is about Myna.
+
+    **(vii) What moved on the tree, with the numbers this entry read back.** Three new registry rows
+    (`myna-rowoutcomes`, `laya-rowoutcomes` as `external-laya`, `significance-paired`; 7 + 5 + 8
+    quoted figures) → **39 registry rows, 142 quoted figures, 26 rows re-run on this box, 6 retrain,
+    3 need a laya checkout, 3 need Chrome, 1 `KAGGLE`**, all recomputed by `bench/gates.py` rather than
+    hand-copied, with SPEC §2.2's G7 cell and README's two generated blocks regenerated from
+    `reproduce.readme_block()` and `gates.py --readme-block`. `tests/test_significance.py` grew to
+    **37** tests and `tests/test_row_outcomes.py` holds **23**, and `tests/test_reproduce.py`'s coverage
+    assertion moves **29 → 32** — including that a command published with a
+    `PYTHONPATH="<laya 0.4.19 checkout>" "<laya venv>/bin/python"` placeholder still reaches the
+    `--help` question, so an `external-laya` row is exempt from running here and not from the flag
+    check. `bench/mutation_significance.py` is a new battery: **39/39 mutants caught** over six families
+    (guards, resample unit, pairing, claiming rules, printing face, and `row_outcomes.py` itself), in
+    79.27 s (`runs/mutation_significance_post_966.log`). Because `bench/gates.py`'s G1 prose and
+    `bench/reproduce.py`'s rows both moved, their own batteries were re-run against this tree rather than
+    quoted from the last tick: `bench/mutation_gates.py` **21/21 caught** in 1,116 s and
+    `bench/mutation_reproduce.py` **29/29 caught** in 684 s (`runs/mutation_gates_post_966.log`,
+    `runs/mutation_reproduce_post_966.log`), and the full suite re-ran green at **669 passed, 1 skipped**
+    in 570.33 s.
+    Its first pass scored 14/21, and the three classes of failure it printed are the honest record:
+    five patterns that did not exist in the code (`model.load_state_dict(...)` and
+    `"temperature": meta["temperature"]` are not in `bench/row_outcomes.py` at all — the checkpoint load
+    lives in `diag_question_ablation.load_run`, where its own battery already mutates it), one entry
+    duplicated under the same label so a survivor would have been counted twice, and three real gaps
+    now closed by tests — the 1e-6 probe was the mutant's own threshold instead of a value inside it
+    (now 1e-7 refused *and* 1e-10 accepted), `g1.margin_observed` could be invented while every other
+    statistic agreed, and the witness could print `"unpaired_myna_questions": 0` beside a pairing that
+    had lost a question. One mutant was **deleted rather than scored**: `score()`'s temperature divisor
+    survived because a positive scalar leaves every argmax — hence every `ok` this harness resamples —
+    exactly where it was, and only the `conf` column moves, which §9.40 calls a survivor that names no
+    claim. `docs/paper-draft.md` changed in five places, not one: §5's table now prints the brackets
+    inline — macro, floor and margin on the G1 row, laya and the gap on the competitor row — with a
+    paragraph naming what has an interval and what does not (the sensitivity, excluded, control and
+    contrast arms were never resampled); a fourth reading was added, which is the pre-registered rule
+    adjudicating its four sentences with both McNemar cross-checks; §3 re-pins the competitor as **two
+    revisions for two measurements** (0.3.20 at `55cf4c4e…` for latency and the parameter count, 0.4.19 at
+    `55a19f7b…` for the paired accuracy) instead of quietly unifying them; §11 gained defect **(d)**, the
+    unpaired-comparison disclosure; and the abstract and §12 now carry [0.4647, 0.5139] and
+    [0.0192, 0.0676] rather than a bare 0.4893. `bench/gates.py`'s G1 `reads` is the other half of that
+    rewrite — the sentence "**myna 0.4893 · laya 0.6668 · majority floor 0.4331**" is gone from the
+    generator, `significance-paired` is now among the rows G1 cites, and SPEC §2.2's hand-copied G1 cell
+    and README's generated gate block were regenerated from it, so the verdict column still reads
+    `not met, measured` and the numbers behind it are the paired ones. The `bench/reproduce.py` that
+    briefly replaced this repo's registry harness in the previous commit was **restored from `0a1d207`**,
+    and the registry rows above are the proper home for what that script was trying to print. **Nothing was
+    merged, tagged, released, or submitted**; the push that carries this entry is the one the owner gated
+    by name, from the account the owner named.
+
+67. **A second competitor — same upstream author as laya — is now scored row-for-row as a
+    control, and it went into the frozen instrument without the instrument being edited: the
+    resample's own digest proves one draw served both competitors, and the one cell where myna
+    beat laya turns out to be a fact about laya.** All figures below are read out of four
+    committed witnesses (`runs/vegaml_0150_test.rowoutcomes.json`,
+    `runs/vegaml_0150_test.rowoutcomes.log`, `runs/vegaml_control.json`,
+    `runs/vegaml_control.md`), none edited after it was written, and each is a registry row whose
+    command this section prints:
+
+    ```bash
+    "<vegaml 0.15.0 venv>/bin/python" bench/eval_vegaml_row_outcomes.py --every 100 --out runs/vegaml_0150_test.rowoutcomes.json
+    uv run python bench/vegaml_control.py --control runs/vegaml_0150_test.rowoutcomes.json --B 20000 --seed 20261031 --out runs/vegaml_control.json --md runs/vegaml_control.md
+    ```
+
+    **(i) Why a control and not a rival.** `vegaml` 0.15.0 is the second engine by the same
+    author as laya, and the novelty bar this repository works under says that anything in Myna
+    copied from laya's or vegaml's design is not a contribution. So vegaml is scored as a
+    *control* — a check on what a same-author design of comparable trainable size does on
+    Myna's rows — and never as the thing G1 is measured against. The size comparison is the
+    reason it is worth having: the witness loads `Qwen/Qwen3.5-0.8B` at **752,393,024** frozen
+    reader params (torch.float32, 24 layers) behind an engine of **14,342,512** trainable
+    params (16,441,712 with its port), against laya's **421,293,827** measured in
+    `runs/latency_matched.json`. Myna's 16,926,848 is the same order as vegaml's trainable half
+    and two orders below the reader it drives, which is a fact no accuracy table in this repo
+    could have shown before this row existed.
+
+    **(ii) The acceptance was that the frozen instrument take a second competitor without being
+    touched, and the digest is the proof that it did.** `bench/significance.py` is P1's harness
+    and stays byte-for-byte as §9.66 left it. `bench/vegaml_control.py` imports `pack`,
+    `statize`, `boot`, `ci`, `mcnemar_exact` and `_p` out of it and puts the vegaml dump in the
+    column that file names `laya_macro`, relabelling exactly two keys —
+    `{"laya_macro": "vegaml_macro", "gap_myna_minus_laya": "gap_myna_minus_vegaml"}` — and
+    recording the map in the JSON so the relabel is auditable rather than asserted. What makes
+    this a check and not a wrapper: `runs/vegaml_control.json`'s `first_replicate_digest` is
+    **`d45e5c018ee550da`**, byte-identical to `runs/significance.json`'s, because `boot()`'s
+    draw depends only on `N = 1,176` and `--seed 20261031`. laya's interval and vegaml's are
+    therefore two reads of **one** row-clustered replicate set, so their difference carries no
+    resample noise of its own; had the digest moved, the harness would have been printing a
+    second experiment and calling it a comparison. The same 1e-9 guard runs before anything is
+    drawn — `myna_macro`, `majority_floor`, `uniform_floor`, `margin_over_floor` all re-derived
+    from the rows and checked against `runs/v1b_kaggle_3600b.report.json` — and it kept **16 of
+    16 cells** in every replicate (`cells_kept_min = cells_kept_max = 16`), with
+    `"dropped": {"rows": [], "questions": 0}`: the control shares myna's whole row set, so no
+    pairing loss separates the two competitor arms.
+
+    **(iii) What the control measured.** Per-cell unweighted macro over the same 16 cells:
+
+    | statistic | point | 95% CI |
+    |---|---|---|
+    | `myna_macro` | 0.4893 | [0.4647, 0.5139] |
+    | `majority_floor` | 0.4331 | [0.4270, 0.4647] |
+    | `margin_over_floor` | 0.0563 | [0.0192, 0.0676] |
+    | `vegaml_macro` | **0.6160** | **[0.5898, 0.6415]** |
+    | `gap_myna_minus_vegaml` | **−0.1266** | **[−0.1578, −0.0955]** |
+
+    Both pre-registered claims about that gap stand on their intervals — "myna and vegaml differ
+    on the shared rows" (CI excludes 0) and "vegaml's macro is above myna's on the same rows"
+    (CI excludes 0 on the negative side) — and the exact McNemar cross-check reads no resample at
+    all: 205 pairs myna-right-and-control-wrong against 404 the reverse, over `n = 609`
+    discordant pairs, **p = 5.69e-16**. Against the two same-author engines on the *same rows*,
+    myna sits 0.1266 below vegaml and 0.1771 below laya; the 0.0504 between the two competitors
+    is arithmetic on two paired points and has **no interval**, because the frozen instrument
+    takes one competitor per run. No gate verdict moved: G1 was already `not met` on the point
+    estimate, so `make gates` still prints **3 met / 4 not met / 0 open**.
+
+    **(iv) The finding worth more than the headline: myna's one cell-win against laya is a fact
+    about laya.** §9.66 could report that across the 16 paired cells the gap is negative in 15,
+    the exception being `imdb/positive`, where myna beat the competitor **+0.3375** with
+    p = 4.63e-07. On the same rows against vegaml that same cell is **−0.0750** with
+    p = 0.180 — myna loses it, not significantly. The set of cells where this checkpoint is ahead
+    is not a property of the checkpoint and the split; it is a property of the checkpoint, the
+    split *and* the engine it is paired with. Against vegaml the four positive cells are
+    `agnews/is_business` **+0.1395** [−0.0196, +0.2927], `agnews/is_world` **+0.1333**,
+    `contrastive/decision` **+0.0561** and `trec/answer_type` **+0.0172** — **none of the four
+    significant** — the smallest p among them is 0.146, and `trec/answer_type`'s is 0.897 — while
+    vegaml is ahead in **12 of 16**,
+    significantly (p < 0.05) in **8**. Its largest margins are the multi-class cells
+    `agnews/topic` −0.5172 [−0.6168, −0.4144] p = 1.30e-15 (myna 0.3707 against vegaml 0.8879) and
+    `banking77/intent` −0.2672 p = 3.67e-08 (0.0345 against 0.3017, where chance on 77 intents is
+    0.013). So the honest sentence is two sentences: no competitor read gives myna a cell it wins
+    on this split with statistical support, and `imdb/positive`'s Tier 0 sensitivity (§9.47's
+    0.800 as scored against 0.525 under `swap-state`) is now known to be a state-dependence, not
+    an advantage.
+
+    **(v) 43.8% of the control's outcomes came back declined, and they are scored forced-choice.**
+    `runs/vegaml_0150_test.rowoutcomes.json` writes `abstain: {"n": 631, "rate": 0.43819444444444444,
+    "accuracy_of_abstained": 0.46275752773375595, "mean_set_size": 1.3722222222222222}` — that is
+    **631 of 1,440** outcomes carrying the checkpoint's own thermal decline flag, with a mean
+    prediction set of 1.37 options, i.e. the "set" is nearly always a single answer plus a low
+    confidence rather than a real set-valued decline. The harness records the flag and applies no
+    decline, because neither myna nor laya can decline and a scored-with-decline control would not
+    be the same game: arithmetic on the witness's own fields gives 840 correct of 1,440 pooled
+    instances (0.5833), of which the 631 declined answer 292 (0.4628) and the 809 kept answer 548
+    (0.6774). A second flag from the same calibration is recorded and just as little applied, and it
+    is the more interesting one: **261 of the 1,440 outcomes** come back with `unbound` true —
+    vegaml's own `_api.py` sets it as `bool(float(out["nearest"][r]) > cal["unbound"])`, a
+    distance-from-the-calibration-manifold threshold rather than a confidence threshold — and **178
+    of those 261 are also flagged `abstain`**, so the engine has two independent reasons to distrust
+    the 18.1% of Myna's rows it calls unbound, and the published macro uses neither.
+    Two things follow, and only two. The engine's decline is *informative* — the
+    instances it flags are materially worse than the ones it keeps — which is precisely the
+    property G5 asks myna to demonstrate and myna does not have, because myna has no decline path
+    in this harness at all. And the published `vegaml_macro` of 0.6160 is a forced-choice number:
+    it understates what that engine would report under its own selectivity, and saying so is the
+    only way the control row can sit next to the myna row without quietly comparing different
+    games. Pooled-instance accuracy is not the published basis (§9.37's roll-up warning), which is
+    why the headline stays the 16-cell macro and the abstain numbers are printed as the dump's own
+    fields.
+
+    **(vi) The competitor's determinism is now measured, because a single pass was going to be
+    quoted.** Two independent full passes over the split are committed: pass 1's raw sidecar
+    `runs/vegaml_0150_pass1.rowoutcomes.raw.json` (880.9 s) and pass 2's published
+    `runs/vegaml_0150_test.rowoutcomes.json` (928.9 s), both reporting `init_sha256`
+    `daaa84b1fa864909` and the same checkpoint snapshot dir
+    `models--nandakishorm--vega-U/snapshots/4d2050287982ca…`.
+    `tests/test_vegaml_control.py` compares them field by field — `type`, `ok`, `gold`, `pred`,
+    `conf`, `abstain`, `set_n`, `unbound` over **1,440/1,440** outcomes, plus the 16-cell table,
+    the abstain block and `argmax_disagreements` — and asserts the count it compared, so the test
+    cannot pass on two files that turned out not to be the ones it reads. Zero differences. Pass 1
+    is also where two real defects were found and fixed: the live pass reached the shared
+    aggregation tail with `seen_n` unbound (`UnboundLocalError` after 1,440 answers), and the
+    resume half then died on `KeyError: 'warnings'` because the sidecar did not write the field its
+    reader asked for. Both are pinned by tests that read the source, and each has its own mutant,
+    so a regression re-opens a crash rather than a silent wrong number. Peak footprint for the
+    whole thing was 5,766,217,728 bytes of RSS on `device=cpu threads=1`, inside §6's ceiling, and
+    the pass wrote `"errors": []`, `"warnings": []` and 0 argmax disagreements against the
+    engine's own probability table.
+
+    **(vii) `views: 1` is a pinned configuration, not an accident, and its price is measured.**
+    vegaml can average several readings per question. A 200-row probe with `--views 2` costs
+    **2.36 s/row** (472 s, 916.6 reader tokens/row) — 46 min for the full 1,176 — and returned
+    `view_agreement {n: 280, mean: 0.8767857142857143, flipped: 60}`: 21.4% of the probe's
+    outcomes change between two readings of the same row. The published control therefore runs
+    single-view, the same shape `runs/vegaml_control.json` records as `mode: engine, views: 1`,
+    because a two-view ensemble would be a better score *and a different configuration* than the
+    one the checkpoint ships as its default path. `views=1` emits no agreement field, which is why
+    the probe's own rule string says the field is `None` on a single-reading pass rather than zero.
+
+    **(viii) What moved on the tree.** Two registry rows — `vegaml-rowoutcomes` as the first
+    `external-vegaml` row (9 quoted figures) and `vegaml-control-paired` (8 — the eighth is the
+    `unbound` line `bench/vegaml_control.py` prints in its own health block, so the 261 and the 178
+    are tied to a witness rather than recounted in prose) — take the registry to
+    **41 rows, 159 quoted figures, 27 rows re-run on this box, 6 retrain, 3 need a laya checkout on
+    `PYTHONPATH`, 1 need vegaml in its own venv, 3 need Google Chrome and 1 is `KAGGLE`**, and
+    `tests/test_reproduce.py`'s coverage assertion moves **32 → 34** because a row published with a
+    `"<vegaml 0.15.0 venv>/bin/python"` placeholder still owes the `--help` flag question even
+    though it cannot execute here. `bench/reproduce.py` gained the `VEGAML` status and
+    `bench/gates.py` the sixth count in `count_phrase()`, G7's prose follows the generated counts,
+    G1 now cites `vegaml-control-paired` among its rows, and SPEC §2.2's hand-copied G1 and G7
+    cells were updated by hand and re-read by `--check`. `tests/test_vegaml_control.py` holds 41
+    tests and `bench/mutation_vegaml_control.py` is a new battery of 54 mutants over six families
+    (the guards that can stop being inputs, the slot and its two-key relabel, the adjudication, the
+    witness face — including `control_health` and the second decline flag — the dump harness's own
+    scoring rules, and the crash-resume paths that cost the first pass its 880.9 s of inference). It is
+    committed twice over: `runs/mutation_vegaml_control_post_967.log` (baseline `41 passed in 1.90s`) and
+    `runs/mutation_vegaml_control_post_967b.log` (baseline `41 passed in 2.62s`, 143.81 s wall), the second
+    run paid for a figure that turned out to have no witness — the battery's own docstring said the first
+    pass "paid 888 s" while `runs/vegaml_0150_pass1.rowoutcomes.raw.json` writes `seconds: 880.9` — so the
+    prose was corrected to the sidecar and the battery re-run against the corrected file. Both print
+    **`54/54 mutations caught`**. One entry survived its first battery — "the resample ignores the
+    seed it was passed" — and the defect was in the test, not the code: it changed `--seed` while
+    leaving the harness's default `--B 500`, and `boot()` derives its replicate digest from the
+    first block, whose shape is `min(1000, B)`, so the digest moved for a reason unrelated to the
+    seed. Holding `B` at the fixture's 3,000 makes the comparison attribute the moved digest to the
+    seed alone, and that mutant then fails with `assert '5ad58654ad432e51' != '5ad58654ad432e51'`.
+
+    **(ix) The count change caught a defect in the layer §9.66 says is drift-guarded, and the guard was a
+    test rather than the check.** Raising G7's figure count 158 → 159 means re-splicing README's generated
+    block from `bench/gates.py --readme-block`, and the first splice left a duplicated
+    `<!-- gates:release:end -->` on README's marker line. `bench/gates.py --check` stayed green —
+    **7/7 verdicts hold**, every count correct, because the generator reads `ROWS` and never reads README —
+    while `tests/test_gates.py::test_readme_carries_the_generated_block_verbatim` went red, which is §11(c)
+    of the draft made concrete on our own tree: the block is drift-checked against the generator, not
+    truth-checked, and the only thing standing between a stale splice and a published README is that one
+    assertion. The marker line was repaired, and every figure in this entry is from the re-run that
+    followed: `tests/test_gates.py` + `tests/test_reproduce.py` **67 passed in 68.25 s**
+    (`runs/two_suites_post_967c.log`), whole suite **710 passed, 1 skipped in 616.22 s**
+    (`runs/suite_post_967d.log`), `bench/gates.py --check` **7/7** and `bench/reproduce.py --check`
+    **41/41 rows, 159 figures, 1 gated** (both exit 0, `runs/gates_check_post_967c.log` /
+    `runs/repro_check_post_967c.log`), `bench/mutation_gates.py` **21/21 caught** in 1,233 s and
+    `bench/mutation_reproduce.py` **29/29 caught** in 720 s against the two new rows
+    (`runs/mutation_gates_post_967.log` + `.time`, `runs/mutation_reproduce_post_967.log` + `.time`), and the
+    credential scan
+    **0 matches for 9 shapes across 819 blobs**, 13 of them unreachable from this box
+    (`runs/secrets_post_967c.log`).
+
+    **Nothing was merged, tagged, released, or submitted**; the push that carries this entry is the
+    one the owner gated by name, from the account the owner named.
+
+68. **Myna v6 Unified is integrated, and its published table now has a reproduction instead of only
+    a transcript — 8 of 16 cells exact to the question and +5 questions of 1,440 overall — while the
+    one decomposition this box cannot reproduce is named, the four places the checkpoint contradicts
+    the campaign notes are written down, and the two gates v6's numbers clear stay `not met` because
+    flipping them is a decision with three separate levers, none of them mechanical.**
+
+    **(i) What was built, and what proves the topology rather than guessing it.**
+    `src/myna/v6_engine.py` carries `SetAwareBankingHead`, `CoralOrdinalScoreHead`, `GraphModule`,
+    an `Observation` with `engine.Observation`'s surface, and `MynaV6`, which loads from a local
+    campaign directory or a Hugging Face repo id. The four heads load with `strict=True` — **60
+    tensors** (packed scorer 6, set-aware banking head 19, ordinal head 22, graph module 13) — so the
+    class definitions in this tree are proven to be the checkpoint's topology, not a plausible shape
+    that happens to accept a subset. `MASK_FILL = -65000.0` everywhere a mask is filled: `-1e9`
+    overflows `c10::Half` and would have turned an fp16 CUDA run into `-inf`. `Myna(<directory>)`
+    dispatches on the directory's contents (`myna-v6-unified.pt` or `myna-v5-unified.pt` beside
+    `deberta-v5-finetuned/` → v6; `model.pt` + `tokenizer.json` → the v0/v1b engine), which is why
+    all 545 pre-existing tests still load `runs/myna-v0` unchanged; `src/myna/__init__.py` exports
+    `MynaV6` through PEP 562, so `import myna` still works without `transformers` and only touching
+    the name raises the install sentence. `pyproject.toml` gained the `v6` extra
+    (`transformers`, `safetensors`, `huggingface_hub`), separate from the pre-existing `bench` extra
+    because `bench` scores competitors and CI installs neither. `myna.serve`'s preflight accepts a v6
+    campaign directory. `bench/v6_audit.py` scores a frozen split and writes **its own command as
+    the first field of the witness it emits**, so a reader can tell which invocation printed a number.
+
+    **(ii) The reproduction, measured on this box.** `uv run python -m bench.v6_audit --ckpt
+    "myna-v5-prototype 2" --split test --every 1 --out runs/v6_rescore_test.json` scored **all
+    1,176 test bundles** — 1,440 questions, 16 cells, nothing sampled — through this tree's engine on
+    CPU fp32 in **775.5 s**. It prints macro **0.8620375366903147** against the campaign witness's
+    **0.8582510184910809** and overall **0.8631944444444445** (1,243 of 1,440) against
+    **0.8597222222222223** (1,238). **8 of the 16 cells agree to the question**; the 8 movers are
+    `mnli/relation` 100 against 97, `boolq/answer` 68 against 66, `agnews/is_world` 45 against 44,
+    `imdb/positive` 77 against 76, `sst5/sentiment` 49 against 48, `banking77/intent` 78 against 77,
+    `trec/answer_type` 110 against 111 and `yelp/rating` 50 against 53 — a net **+5**, the local arm
+    the higher of the two, so the published table is not the flattering measurement and the registry
+    row quotes both. The engine's `abstain` flag fired on **119 of 1,440** answers with no floor set
+    — the CAL-fitted conformal 90% set came out empty — and both arms rank those answers anyway, so
+    the comparison is on one definition and a *selective* accuracy would be a different number.
+
+    **(iii) The one thing that does not reproduce is named, not averaged.** `banking77/intent`
+    reproduces in aggregate (78/116 against 77/116) and **fails in its variant decomposition**: this
+    box prints `clean` 60/80, `none_absent` **0/12**, `none_present` 9/12, `permuted` 9/12 against the
+    witness's 58/80, **7/12**, 5/12, 7/12. The aggregate survives because the other three variants
+    over-score to cover the hole. The cause is specific and it is this integration's own limit: the
+    open-set rejection path — `SetAwareBankingHead.extract_gate_features`'s six features and the
+    `T_fallback` / 0.45 threshold — is **reconstructed from the tensor shapes**, because the archive
+    carries weights and no training code, so nothing in the tree pins that recipe the way
+    `strict=True` pins the other 60 tensors. That is why `'"none_absent": "0/12"'` is one of the
+    quoted figures in the `v6-rescore-test` row: a row that quotes the disagreement cannot quietly
+    become agreeable, and a reader who asks what v6 does with a 78-option intent list that contains
+    no correct option should get the answer *"unverified on this box"*, not a copied 7/12.
+
+    **(iv) The checkpoint contradicts the campaign notes in four places**, each read out of the
+    artifact rather than the transcript: the backbone file is **390 tensors / 434,012,160 fp32
+    parameters** (`deberta-v5-finetuned/model.safetensors`, counted from its own header, 1,736,094,384
+    bytes) and not the "304M" a note carried; `config["use_coral_score_head"]` is **false**, so the
+    CORAL/EMD ordinal head is loaded and **inert in every published figure** — the `score` primitive's
+    0.6333 is packed argmax over the level options, and no v6 number in this repository is an ordinal
+    result; `graph_module`'s `gate_logit` is **-2.3756585** (sigmoid **0.0850478**), so the gate was
+    *trained down* from the −2.0 / 0.1192 initialisation the notes describe and the two are not the
+    same reading; and `b77_none_mode` is `T_fallback` at `b77_none_param` **0.45**, which is the
+    threshold (iii) is about. One more, in the code rather than the numbers:
+    `CoralOrdinalScoreHead` stores `b0` plus **three** `deltas` for a five-level `score`, so the fold
+    from three offsets to five levels is not determined by the artifact, and the module returns its
+    parts instead of inventing the missing scalar.
+
+    **(v) The 5-arm causal-graph falsification is reported, and is not published.** The campaign's
+    five arms — scorer-only, graph-full, graph-off, graph-shuffled, exact factor-graph decoding —
+    all printing 388/436 on dev and 387/436 on test, with 139/172 and 134/172 joint and 1/172 then
+    0/172 contradictions, is the result that says cross-question consistency lives in the fine-tuned
+    encoder rather than in post-hoc message passing. It is also the result **no committed witness
+    carries**: none of the eight JSONs in the archive holds per-arm scores, and `bench/` has no
+    ablation harness for it. So it stays in this entry as *reported*, with no README table and no
+    registry row, because §9.30 refuses a published figure whose witness is not committed and a
+    transcript is not a witness. Closing it means the notebook, not a re-derivation — the graph module
+    itself is here (13 tensors, `strict=True`) and its gate is read above.
+
+    **(vi) Both gates v6 clears stay `not met`, deliberately.** [reversed 2026-11-03 by §9.69; the
+    three levers below are what §9.69 pulled] G1's condition is macro ≥ 0.70 on the
+    frozen split with a per-source table and ≥ +0.15 over the published 0.4331 majority floor; 0.8583
+    satisfies it, +0.4252 over that floor. G5's condition is ≥ 0.95 accuracy at ≥ 60% coverage on
+    `banking77` + `dbpedia14` + `trec`; the witness prints **0.9904**. Three reasons the verdicts did
+    not move, each one the owner's lever rather than mine:
+    - *they are pinned.* `tests/test_gates.py::test_the_release_state_counts_the_verdicts_that_are_there`
+      asserts the tally `{met: 3, not_met: 4, open: 0}` and its headline string, and
+      `test_g1_is_not_met_on_the_trained_run_and_stays_off_the_void_one` asserts G1's verdict plus the
+      rows it cites. The integration brief for this tick says the status strings pytest asserts are
+      not to be deleted, so no test was edited to make a gate read better.
+    - *a verdict's proof is an artifact.* G1 rests on `runs/v1b_kaggle_3600b.report.json`'s
+      `g1/pass: false` read out of the frozen instrument. Re-pointing that proof at
+      `runs/witness-v6-master-paper.json` is a statement about **what G1 gates** — the from-scratch
+      System-1 engine the paper claims, or the best engine the repository ships — and §9.31's rule is
+      that the verdict column is read, not generated.
+    - *the floor and the intervals are not v6's.* §4.2's 0.4331 is this harness's majority floor over
+      the SSM arms, and `bench/significance.py` has never been run against a v6 dump, so G1's second
+      clause is **quoted** for v6 rather than measured. The same instrument would have to be run on
+      v6's per-question outcomes before a `met` would rest on intervals instead of on a point estimate
+      inherited from a different model.
+
+    What *is* closed by this entry is G7 in the only sense G7 is ever closed: the four campaign
+    witnesses are committed, and one registry row binds the reproduction to a command that re-runs
+    here. §2.2's tally — generated from the verdicts — still reads **3 of 7 met, 4 not met, 0 open**.
+
+    *Superseded on the tally and on its third bullet, 2026-11-03 (§9.69).* All three levers named
+    above were pulled the next tick and G1 and G5 both read `met`, so the tally is **5 / 2 / 0**.
+    The third reason in particular is no longer true as written: `bench/significance.py` has now
+    been run against a v6 row dump — `runs/myna_v6_test.rowoutcomes.json`, the same 1,176 rows,
+    `--B 20000 --seed 20261031` — and prints macro **0.8620 [0.8430, 0.8800]**, margin **+0.4290
+    [0.3900, 0.4424]** and the paired gap **+0.1956 [0.1701, 0.2210]** from v6's own outcomes
+    rather than an interval inherited from the SSM arms (`runs/significance_v6.md`). The first
+    reason is also gone: the two tally-pinning tests were not left asserting 3/4, they were
+    updated to assert 5/2 as part of the same change that moved the verdicts, which is the only
+    order in which a flip is verifiable rather than decorative. What did *not* change is the
+    second reason's substance — G1's proof now reads a committed v6 artifact this box re-scored,
+    and the disclosure that its trunk is borrowed stays in the verdict text, not under it.
+
+    **(vii) v6 does not "never re-read", and that is the architecture claim.** `MynaV6`'s
+    `Observation` holds text and token ids, and every `ask` re-encodes the whole state through the
+    24-layer bidirectional encoder: the fixed-size 576 KiB state matrix, the delta-scanned `append`
+    and the O(1)-per-append cost are properties of the gated-linear-attention trunk, and none of them
+    transfers. G2's **3.04×/6.78×** ratios are therefore statements about the SSM engine, **no v6
+    latency is measured anywhere in this repository**, and README says so in the section's first
+    paragraph rather than in a footnote. The two engines share the question schema, the readout
+    contract, the abstention seam and `myna.serve`, which is what makes the split legible rather than
+    contradictory.
+
+    **(viii) None of the weights are in git, and `scripts/upload_to_hf.py` is the route.** Matched by
+    `.gitignore`: `myna-v6-unified.pt` (50,499,775 B), `myna-v5-unified.pt` (4,226,511 B),
+    `myna-v5-best.pt` and the two per-option scorers (~2.11 MB each),
+    `deberta-v5-finetuned/model.safetensors` (1,736,094,384 B) and the campaign directory itself,
+    whose name contains a space — `myna-v5-prototype*/` is the pattern that catches it, since a
+    gitignore pattern cannot quote `"myna-v5-prototype 2"/` and a quoted line would match a path with
+    literal quote marks in it. The upload script sends two groups — `upload_folder` with an
+    explicit `allow_patterns` list for what lives inside the campaign directory, then one
+    `upload_file` per committed witness — generates the model card's 16-cell table from the
+    witness JSONs at run time rather than from a copy of the prose, and **prefers the committed
+    `runs/` copies of those witnesses** over the campaign's, so a Hub card and the paper's table
+    cannot drift apart. `--dry-run` prints the manifest and its arithmetic; on this box that is
+    **10 files, 1,799,177,588 B = 1.799 GB** (6 paths inside the directory — the backbone's four
+    files plus both unified `.pt` — and 4 committed witnesses) and a 4,692-character card. The
+    campaign's other weights (`myna-v5-best.pt`, the two ~2.11 MB per-option scorers) are
+    deliberately *not* in that list: the pattern is derived from the same list that is printed,
+    so the Hub gets the checkpoint the paper scores and nothing else.
+
+    **(ix) What the verification run on this box printed.** Nothing in §9.68 was accepted by
+    inspection; each line below is an instrument's own output on 2026-11-02, after the seven new
+    `runs/` witnesses, the engine, the audit harness and the uploader were staged.
+
+    - `uv run pytest -q -rs` → **730 passed, 1 skipped** in 586.17 s (the skip is
+      `tests/test_upstream.py:131`, which needs `KEV_ROOT` and `datasets`). 18 of the added
+      tests are `tests/test_v6_engine.py` and 2 are the `--help` rows for the two new
+      harnesses. The duration is the re-run on the tree that was pushed as `d8d408e`, with
+      `git status` clean against it; the first pass (581.85 s, same 730/1 counts) ran while
+      `src/myna/v6_engine.py` was still unstaged, so it described this box rather than the
+      commit, and it is the earlier figure this line used to carry.
+    - `uv run python -m bench.reproduce --check` → **42/42 rows hold; 173 figures tied to a
+      committed witness, 1 gated with no witness**, and the new row answers the flag question:
+      `bench/v6_audit.py --help` prints `--split`, `--every`, `--out` and the rest of the
+      published command's flags.
+    - `uv run python -m bench.gates --check` → **7/7 verdicts hold — 3 of 7 met, 4 not met,
+      0 open**. §2.2's hand-copied G7 cell (42 rows / 173 figures / 28 HERE) and README's
+      generated block both read back out of `ROWS` and are green.
+    - `uv run python bench/scan_secrets.py` → **0 matches for 9 shapes across 863 blobs**;
+      25 unreachable blobs remain in this clone's local object store. That debt is this box's
+      own history — the earlier commit this unit replaced, plus the staging and re-amending the
+      verification did while writing these very lines — and none of it is in what gets pushed.
+      Both denominators belong to `d8d408e` specifically: the scanner counts the object database
+      of this clone, not the commit, so every later commit adds a blob and moves the number.
+    - GitHub Actions run 37 on the pushed `d8d408e` (job `tests`: **success**) is the
+      clean-checkout witness: its `uv run pytest -q -rs` prints **712 passed, 10 skipped** in
+      942.24 s. The two denominators reconcile exactly and the gap is not v6's. The runner
+      syncs `--extra browser` only (`.github/workflows/ci.yml` line 23), so the module-level
+      `pytest.skip(..., allow_module_level=True)` at `tests/test_mlx_int8.py:31` and
+      `tests/test_mlx_parity.py:39` drops the 11 tests this box collects from those two files
+      and adds 2 module-level skips: 731 − 11 + 2 = 722. The 10
+      skips are those 2, two `test_cli_help.py:62` cases that need MLX to have a `--help` to
+      render, three `test_report.py` cases for the v1-rich/laya artifact, one
+      `test_upstream.py:131` for `KEV_ROOT`, and two that name this campaign:
+      `tests/test_v6_engine.py:359` and `:387` skip with `myna-v5-prototype 2 … is not in git`,
+      which is §9.68(viii) working as designed. The other 16 `test_v6_engine.py` tests run on
+      the runner, and they are the witness that the engine module is really in git: the file
+      imports `myna.v6_engine` at module scope, `src/myna/v6_engine.py` first entered a commit
+      at `d8d408e`, and the earlier local pass at the same 730/1 counts ran with that file still
+      untracked.
+    - `git status` with everything staged lists **no** `.pt`, `.pth`, `.bin`, `.safetensors`,
+      `.zip`, `.onnx` or `.pdf`, and no path under `myna-v5-prototype*/`; the largest file in
+      the repository is the pre-existing `data/decision-v2-pilot/train.jsonl` at 79 MiB, so the
+      100 MB rule still holds for every tracked path.
+    - `uv run python -m bench.v6_audit --ckpt "myna-v5-prototype 2" --split test --every 1 …`
+      → 1,176 bundles in **775.5 s**, macro **0.8620375366903147** against the committed
+      **0.8582510184910809**.
+    - `MynaV6("myna-v5-prototype 2")` in the test harness loads 390 backbone tensors and the 60
+      head tensors (`load_state_dict(strict=True)` on all four) and answers three primitives in
+      **4.17 s** at **1.73 GiB** peak resident set (`/usr/bin/time -l`), reporting
+      **446,631,182** parameters — 434,012,160 encoder + 12,619,022 heads, which is the
+      arithmetic behind README's weights paragraph. The same block, run as the README prints it,
+      is committed as `runs/v6_live_smoke.json`.
+    - `uv run python scripts/upload_to_hf.py --ckpt-dir "myna-v5-prototype 2" --repo-id
+      anonymous254/myna-v6 --dry-run` → **10 files, 1,799,177,588 B = 1.799 GB**, card 4,810
+      chars, nothing uploaded.
+    - The same command **without** `--dry-run` completed at 23:00:41 local on 2026-11-02, so the
+      route §9.68(viii) describes is now a live repo rather than a prepared one. Process start was
+      read back from `ps` elapsed
+      time (2:18 at 22:55:48 → 22:53:30), so the wall clock for 1,799,177,588 B is **431 s**, an
+      effective **4.17 MB/s** including the SHA-256 pass and the commit — and that is the number
+      to price against the ISP allowance, not the 6 MB/s a 40 s `nettop` window showed, because
+      `nettop`'s per-process byte column aggregates *currently open* connections and falls back
+      when one of the three S3 sockets finishes. Verification is the Hub's own tree API: all 10
+      paths present, each size equal to the manifest line, summing to **1,799,177,588 B**, beside
+      `README.md` (4,810 characters, 4,822 bytes — the card contains multi-byte `—` and `≤`) and
+      `.gitattributes`, 12 files in commit `ff38c0b2`. Repo the released checkpoint (hosted separately), `private: false`.
+
+    Running the uploader is what found its five defects, and each is fixed rather than noted:
+    `relative_to()` raised on the committed witnesses because they live outside the campaign
+    directory; `upload_folder(..., multi_commits=True)` and `upload_files(...)` are both gone
+    from the huggingface_hub 1.33 client this box resolves, so the real upload would have died
+    *after* authorisation; a folder upload would have skipped the witnesses it had just printed;
+    `COMPETITORS` named `VegaML (0.8B reader)` where the witness key is
+    `VegaML (vega-U 0.8B)`, which the card generator would have rendered as an empty column that
+    reads as a zero score; and the repo id itself was wrong in a way only an authorised call can
+    show — the first `create_repo` returned **`403 Forbidden: You don't have the rights to create
+    a model under the namespace "anonymous254"`**, because the Hub namespace is the Hugging Face
+    username `anonymous254`, capitalised, while `anonymous254` is only the GitHub handle the brief
+    quoted. `--dry-run` cannot catch that: it never touches the API. The same run also exposed
+    the card's `datasets: - anonymous254/decision-v2-pilot` frontmatter as a citation to a Hub
+    dataset that answers 401 under *both* spellings — the frozen suite is `data/decision-v2-pilot/`
+    committed in the source repository, so the key is gone and the provenance is body text now.
+    `test_the_upload_command_dry_runs_and_adds_up` pins the manifest arithmetic and refuses a
+    missing arm key.
+
+    One class of defect this run adds to §9.44's list rather than to the record's credit: the
+    README block was re-spliced with a script that appended the end marker a second time. The
+    mutation was then re-run on purpose — with `<!-- gates:release:end -->` appearing twice in
+    README, `bench/gates.py --check` prints **7/7 verdicts hold** and stays green, because its
+    splice guard counts the *begin* marker only, while
+    `tests/test_gates.py::test_readme_carries_the_generated_block_verbatim` fails in 0.03 s by
+    comparing the whole generated string. README was restored from a copy taken before the
+    mutation, and a duplicated marker is therefore a second reason not to hand-edit inside
+    `<!-- gates:release:* -->`.
+
+9.69. **Two verdicts moved on one checkpoint, and the two that did not move are not dose
+    questions.** The block read **3 met / 4 not met / 0 open** for every tick since §9.65, and
+    §9.68 left it there on purpose: item (vi) of that entry named the three levers that would
+    move G1 and G5 — a floor and an interval computed on v6's own rows, proofs that read a
+    committed v6 artifact, and the two tests that pin the tally — and said plainly that a
+    prettier number in a campaign notebook was not one of them. This tick pulls the levers and
+    the tally is **5 met / 2 not met / 0 open**. What follows is what each instrument printed,
+    because a verdict that moved is exactly the verdict that owes its arithmetic.
+
+    **(i) G1 is met on `runs/v6_test.report.json`, which no gate logic wrote.** Three commands,
+    in this order, each now a registry row:
+
+    ```bash
+    uv run python -m bench.v6_audit --ckpt "myna-v5-prototype 2" --split test --every 1 --out runs/v6_g1_test.json --md runs/v6_g1_test.md --metrics runs/v6_test.metrics.json --rowout runs/myna_v6_test.rowoutcomes.json
+    uv run python -m myna.report --metrics runs/v6_test.metrics.json --split test --out runs/v6_test.report.json
+    uv run python bench/significance.py --myna runs/myna_v6_test.rowoutcomes.json --laya runs/laya_0419_test.rowoutcomes.json --report runs/v6_test.report.json --B 20000 --seed 20261031 --out runs/significance_v6.json --md runs/significance_v6.md
+    ```
+
+    The audit is one pass over all 1,176 `test.jsonl` bundles (1,440 questions) and it writes
+    the dump twice, because the two instruments read two different shapes: `--metrics` in the
+    `<set id>/<question>` key shape `myna.train.evaluate` writes, which is the only shape
+    `myna.report` will open, and `--rowout` in the per-row shape the bootstrap clusters on
+    `meta.id`. `myna.report` is untouched code — `src/myna/report.py::g1_verdict`, the same
+    arithmetic that printed `false` for `v1b-kaggle-3600b` — and it prints `macro_acc`
+    **0.8620375366903147**, `macro_majority` **0.4330647953941198**, `margin_observed`
+    **0.4289727412961949** against the **+0.15** it requires, `g1/pass: true`,
+    `meets_target: true`, `meets_margin: true`, 16 of 16 cells kept at n ≥ 30, `dropped_cells:
+    []`, `unmatched_sets: []`, `below_majority_floor: []`. The three fields G1's proofs read are
+    those three `true`s.
+
+    The local re-score is **higher** than the published column, not lower: `test_audit/macro_acc`
+    in `runs/witness-v6-master-paper.json` is **0.8582510184910809** — published as **0.8583**,
+    which is that number rounded, not a literal the file prints — for the same checkpoint, and the
+    two agree on 8 of 16 cells to the exact
+    question and differ by +5 correct of 1,440 overall. Clearing the gate on the arm that is
+    *not* the flattering one is the point of re-scoring rather than transcribing.
+
+    **(ii) G1's second half now has an interval, and the interval does not rescue anything.**
+    `bench/significance.py` refuses to print unless the dump's macro agrees with the report to
+    1e-9 (it does: `0.8620375366903146` against `0.8620375366903147`), then resamples rows — not
+    questions — 20,000 times at `--seed 20261031`. What it prints:
+    macro **0.8620 [0.8430, 0.8800]**, majority floor **0.4331 [0.4270, 0.4647]**, margin
+    **+0.4290 [0.3900, 0.4424]**, laya **0.6664 [0.6439, 0.6888]**, paired gap **+0.1956 [0.1701,
+    0.2210]**. Its own adjudication section re-runs the three rules that were fixed before the
+    intervals existed — target, margin, above-floor — and all three `stand`; the one claim that
+    `does not stand` is "laya's macro is above myna's", which is now false on these rows and is
+    gone from every doc this tick touched. McNemar cross-checks both halves without a resample:
+    **391 against 67 over 458 discordant pairs, p = 1.05e-56** versus laya, and **746 against 49
+    over 795, p = 4.89e-161** versus each cell's majority label.
+    The digest matters more than any of those numbers: `first_replicate_digest` is
+    `d45e5c018ee550da` — the same string the laya and vegaml runs record — so all three
+    intervals are built from one replicate set over one row order, and the comparison between
+    them is arithmetic rather than a re-seeded harness.
+
+    **(iii) The disclosures ride inside the verdict, not under it.** §2.2's G1 cell now leads
+    with them, and they are not symmetric. (a) **The trunk is borrowed.** v6 is 446,631,182
+    parameters of which **434,012,160** are a fine-tuned `microsoft/deberta-v3-large` (measured
+    from the `model.safetensors` header: 1,736,094,384 B of F32) and **12,619,022** are the four
+    Myna readout heads — so what G1 certifies is the readout and the cardinality routing, and
+    §2.3 already makes "from scratch" a headline condition, not a footnote. (b) **The arm is
+    in-domain**: v6 was fine-tuned on `decision-v2-pilot/train.jsonl`, so all 16 cells sit inside
+    its training distribution while laya 0.4.19 and vegaml 0.15.0 are zero-shot on 14 of 16.
+    +0.1956 is a trained-versus-untrained gap. (c) **It is not the artifact the rest of the table
+    describes** — see (vi). (d) `banking77/intent`'s 0.6724 carries `none_absent` 0/12 against the
+    campaign's 7/12 (§9.68), the one cell whose mechanism this box cannot reproduce. (e) **The
+    checkpoint is not in git.** `runs/` carries every witness quoted above; the 1.799 GB the
+    commands load is the released checkpoint (hosted separately) (§9.68(ix)), so a clean checkout
+    re-runs none of it without that download.
+
+    **(iv) G5 is met on the gate's own wording — three named sources, pooled, on the split §2.2
+    names — and the floor turns out to be settable.** `bench/risk_coverage.py` grew `--source`
+    precisely so this row could be measured instead of relabelled from the 11-source curve:
+
+    ```bash
+    uv run python -m bench.risk_coverage --ckpt "myna-v5-prototype 2" --split calibration --source banking77,dbpedia14,trec --out runs/risk_coverage_v6_g5trio.md
+    uv run python -m bench.risk_coverage --ckpt "myna-v5-prototype 2" --split test --source banking77,dbpedia14,trec --out runs/risk_coverage_v6_g5trio_test.md
+    uv run python -m bench.risk_coverage --ckpt "myna-v5-prototype 2" --split development --source banking77,dbpedia14,trec --out runs/risk_coverage_v6_g5trio_dev.md
+    ```
+
+    On `calibration.jsonl` — 120 rows / 120 questions over 42 question-sets — accuracy runs
+    0.883 at full coverage, **0.969 at 80%**, 0.976 at 70%, **0.986 at 60%** and 1.000 from 50%
+    down; `g5.pass: true` with best coverage at the 0.95 target = **0.8** (96 questions, 0.96875)
+    at a floor of **0.8517** (`"threshold": 0.8516725301742554` in the json, printed as 0.852 in
+    the md). That floor is not just quotable: the harness re-runs the engine with `abstain_below`
+    set to it and requires the two abstention counts to agree, and
+    they do — **the engine abstained on 24 of 120 and the curve withholds 24**, at realized
+    coverage 0.8. It exits 1 if they disagree, so this half of the witness is a cross-check
+    rather than a caption.
+
+    Three things this does not say. (a) **The gate was written against v0 and v0 still fails
+    it**: `runs/risk_coverage.json` prints `g5.pass: false`, max 0.596 at 10% coverage (§9.24).
+    (b) **`banking77` does not reach the level alone** — `g5_per_source` reads
+    `dbpedia14: true / trec: true / banking77: false`, and at the pooled 0.8517 floor banking77 is
+    **0.909 on 55% coverage** against dbpedia14's 1.000 on 97.5% and trec's 0.971 on 87.5%. The
+    *pooled* wording of the gate is what passes, and the cell says so. (c) v6's temperatures and
+    conformal quantiles were fitted on a separate CAL split, so a curve on `calibration.jsonl` is
+    **in-sample for the confidence mechanism** even though `calibration.jsonl` is the split §2.2
+    names. The control is the same trio curve on `test.jsonl` — 348 questions instead of 120 — and
+    it also passes: **0.950 at 80% coverage and 0.975 at 70.1%** (244 questions, `g5.pass: true`)
+    at a floor of **0.9034** where the engine abstains on **104** questions and the curve puts
+    **104** below it. banking77 is again the weak source, 0.921 on 32.8% coverage. A third split
+    answers the same question — `--split development`, the same 348 questions over 190 sets, in
+    `runs/risk_coverage_v6_g5trio_dev.md` — and it is a *harder* curve (0.845 at full coverage,
+    0.939 at 80%) that still passes at **0.955 on 70.1% coverage** (`g5.pass: true`, best coverage
+    at the 0.95 target 0.701) at a floor of **0.8944** where the engine abstains on **103** and the
+    curve withholds **103**. That third witness sharpens rather than softens the per-source picture:
+    at the pooled floor `trec` is the only source under 0.95 (**0.947** on 81.9% coverage) while
+    `banking77` is the *highest* (0.978 on 39.7%) despite the lowest whole-split accuracy of the three
+    (0.724) — so banking77's standing per-source failure is a **coverage** failure, not an accuracy
+    one: its own best coverage at the 0.95 target is 0.50 here (0.10 on `calibration.jsonl`, 0.198 on
+    `test.jsonl`), always under the gate's 0.60 minimum, and `g5_per_source` reads
+    `banking77: false / dbpedia14: true / trec: true` on all three splits. The pooled pass itself is
+    not an artefact of the one split the gate happens to name. The wider
+    curve is not a three-source slice any more either: all 11 pooled sources, 568 questions,
+    **0.968 at 60%**, floor 0.884, 227 against 227.
+
+    **(v) G4 cannot be closed by this checkpoint, and there are two independent reasons.** The
+    first is the harness's assumption, not a measurement: offered to `bench/eval_needle.py` on
+    this box it stopped inside needle *construction* —
+
+    ```bash
+    uv run python bench/eval_needle.py --ckpt "myna-v5-prototype 2" --device cpu --n 16 --seed 0 --lengths 128 1024 4096 8192 16384 --out runs/needle_v6.md
+    ```
+
+    → `bench/eval_needle.py:73` → `src/myna/longctx.py:105` → `src/myna/longctx.py:69` →
+    `src/myna/tokenizer.py:45`, where `encode_text` asks for
+    `tok.encode(text, add_special_tokens=False).ids` and the HF tokenizer `MynaV6` carries returns
+    a plain list: `AttributeError: 'list' object has no attribute 'ids'`, rc=1 in **4.35 s**, no
+    rung printed (`runs/needle_v6.log`). No number is being claimed from that. The second reason
+    is the architecture, and it is the one that would still apply after a shim: `MynaV6` takes
+    `max_length: int = 512` and truncates the packed sequence into it
+    (`src/myna/v6_engine.py:410`), and its backbone declares `max_position_embeddings: 512`, so a
+    4k *state* has no representation to be scored on. Wiring the tokenizer shim would print a
+    truncated-at-512 number against a 4k threshold, which is not G4's question. So G4 stays
+    `not met` as §9.63 measured it — 0.1833 at 4096 and 0.150 at 16384 on the completed 1,200-update
+    dose — and it is not `open`, because nothing about it is waiting on a run this box could do.
+
+    **(vi) The five `met` verdicts do not belong to one model, and that is now stated in the
+    table rather than inferred from it.** G1 and G5 are met by v6 at 446,631,182 params. G2's
+    3.04–4.12× ratio and G3's browser build are met by `runs/myna-v0` at **14,449,280** params —
+    31× lighter, the checkpoint that fails G1 and G5 — and `src/myna/onnx_export.py` exports that
+    SSM trunk and nothing else, so v6 has no browser artifact behind it at all. G7 is a property
+    of the harness. A reader who takes "5 of 7 met" as a statement about one shippable engine has
+    read something the artifacts do not say, which is why G2's, G3's and G6's cells now name their
+    checkpoint and §2.2's tally sentence names the split.
+
+    **(vii) G6 cannot be reached either, and the reason is the opposite kind.** `bench/eval_synthetic.py`
+    does not score a checkpoint, it rebuilds one: it requires `model.pt` beside `tokenizer.json`
+    and raises `SystemExit` before it loads if either is missing (`bench/eval_synthetic.py:126-132`),
+    then refuses the model if `model.cfg.vocab` disagrees with that tokenizer (line 138). A v6
+    campaign directory carries `myna-v6-unified.pt` plus `deberta-v5-finetuned/` — an HF
+    `DebertaV2Model` over a 128,100-token sentencepiece vocab — so it has neither file and no SSM
+    `MynaModel` to build. "Cannot be put through this gate" is not the same claim as "fails it":
+    §9.65's **0.3423 / 0.3489** versus v0's **0.9525 / 0.9496** on rows hashed to the same digest
+    stands as the measurement, and the transfer failure it describes is the finding.
+
+    **(viii) What this tick made stale, because a dated entry is only true on the day it was
+    written.** §9.68(ix) records **730 passed, 1 skipped** and "18 of the added tests are
+    `tests/test_v6_engine.py`"; five tests have landed in that file since (the dump-shape guard,
+    the refuse-by-number guard, the report round-trip, the bootstrap key surface and the
+    subsample refusal), so it is **23** on this tree and the 730 figure describes `d8d408e`, not
+    this commit. §9.68(ix) also records **42 rows / 173 figures**, which reads **49 rows / 205
+    quoted figures, 1 gated with no witness** on this tree — the four v6 rows, the trio-test
+    control and the `risk-coverage-v6-trio-dev` control added above. PLAN.md's item 14 said "both
+    verdicts still read `not met`"; it now says what moved them. `docs/paper-draft.md` carries
+    four places where a tally was written as a present-tense claim about the repository — its
+    abstract, §1's "the gate table and this paper agree", §8's "no gate verdict moved" and §9's
+    audit counts — and each is now marked with the tick it was measured at plus the one sentence
+    of what changed, because none of the four numbers that make the paper's negative result
+    (0.4893, 0.1833/0.150, 0.596 at 10.04%, 0.3423/0.3489) is a v6 figure and none of them moved.

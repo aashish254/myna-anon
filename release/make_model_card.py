@@ -104,7 +104,7 @@ def main() -> None:
         "```python",
         "from myna import Myna",
         "",
-        'engine = Myna("anonymous/myna-v6")',
+        'engine = Myna("anonymous254/myna-v6")',
         "out = engine.predict(",
         '    state="I was charged twice for the same order.",',
         '    questions={"intent": {"type": "choice",',

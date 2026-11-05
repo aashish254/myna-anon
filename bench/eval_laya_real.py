@@ -6,7 +6,7 @@ same box). Reports per-question accuracy (choice/noul argmax, score argmax over
 the level distribution), noul Brier, and grouped by source and by type.
 
 Usage:
-  PYTHONPATH="/repo/github contribution /GIT/laya" \
+  PYTHONPATH="/repo contribution /GIT/laya" \
     uv run python -m bench.eval_laya_real --split development --n-per-source 30
 """
 
@@ -72,7 +72,7 @@ def run(records, router, rng):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--suite", default="/repo/github contribution /GIT/kev/evals/decision-v2")
+    ap.add_argument("--suite", default="/repo contribution /GIT/kev/evals/decision-v2")
     ap.add_argument("--split", default="development")
     ap.add_argument("--n-per-source", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)

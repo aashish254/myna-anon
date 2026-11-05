@@ -1,6 +1,6 @@
 {
   "cmd": "anti_prior_audit.py --compare --out runs/anti_prior_audit.json",
-  "suite": "/repo/next ko ne next gen model/data/decision-v2-pilot/train.jsonl",
+  "suite": "/repo ko ne next gen model/data/decision-v2-pilot/train.jsonl",
   "suite_sha256": "5f5f93ff7ca03e4522dbe5bdff50e0a92cd5467d613d32d6a5988b8a00870a64",
   "rows": 57904,
   "question_sets": 17112,
