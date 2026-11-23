@@ -976,58 +976,13 @@ once (`uv run python -c "import mlx.core"` is the one command that shows it). Th
 rows report the same limit as a note rather than a failure. Both facts are CI-measured and in §9.51,
 which is the entry for the tick this repo's Actions tab had never once gone green.
 
-**Weights are not in the tree** — `.gitignore` keeps `*.pt` out, and G7's witness is the committed
-JSON, not a binary. The v0 checkpoint that ~20 registry rows read as `--ckpt runs/myna-v0` is
-therefore a [Release asset](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/v0-checkpoint), with its
-sha256 and the re-run that ties it to `runs/risk_coverage.json` on the page. The V1-B weights behind
-the 0.4893 macro are **also** there now — [v1b-checkpoint](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/v1b-checkpoint),
-recovered on 2026-10-01 from the Kaggle notebook's Output archive after §9.50 had recorded them as
-destroyed with `/private/tmp/kgwork`. The page carries the three hashes that tie those bytes to the
-committed Tier 0 witness (`model 0e73a8f07edc`, `tokenizer 0252c24627ee`, and a `metrics.json` that
-`cmp`s byte-identical to `runs/v1b_kaggle_3600b.metrics.json`), which is why "recovered" is a
-measurement here and not a hope. §9.53 is the entry. The `off` control of the P10 pair ships the same
-way — [antiprior_off_s0-weights](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/antiprior_off_s0-weights),
-`model.pt` 67,733,781 B at sha256 `30f0fa937e57e8ce…`, downloaded back and re-hashed on 2026-10-01 —
-and its title says **3,314 of 3,600 updates**, because the tag previously claimed the requested dose as
-if it were the achieved one (§9.54). That checkpoint is now ablated too, and what it says is the thing
-the accuracy work needed before spending another GPU hour: **the control's +0.0445 over V1-B (exactly
-0.0445463372) arrives with less prompt-selectivity, not more** — its blank-instruction macro rises
-further (+0.0974) than its
-as-scored one (+0.0445), and a fourth cell (`agnews/is_business`) has become a constant emitter that
-prints its own 0.698 floor. §9.55(iii) is the entry and `tier0-off-control` is the row. The stopped
-`on` arm's snapshots are labelled by step, because size does not identify them: the
-`antiprior_on_s0-wip` asset (release deleted 2026-10-05) is the ≤step-250 bytes (203,229,625 B, sha256 `8ed38b240bd843bf…`,
-downloaded and re-hashed), while this box's `runs/antiprior_on_s0/model_last.pt` is the step-500 save —
-same byte count, sha256 `3b45dd6a4ae65e77…` — and it is gitignored, so §9.55(ii) keeps that as an open
-durability gap rather than a covered one. The `on` arm has since run to completion **on this box**:
-continued from that step-500 save through the canonical launcher with `--resume`, ending at
-`"last_step": 3314` of `"steps_requested": 3315` with `"stopped": null`, so the pair is one machine and
-one dose and the residue left is the re-seeded data RNG a continuation cannot avoid. The coverage
-asymmetry this README used to report — 176,003 paraphrase draws against the control's 207,411 over the
-same 17,112 sets, "15.2% fewer per update" — was a denominator, not a dose: the continued process ran
-2,814 updates, so the two arms reach **62.55 and 62.57 draws per executed update**, and a CPU replay of
-both drawers lands on both counters exactly (§9.58). The judgement §9.56(vii) fixed before the run
-printed: **test macro 0.4784612299508689 against 0.5338735348381732, −0.0554 from the flag alone**, and
-**0 constant emitters where the control has 4**, so the shortcut is gone and nothing readable arrived in
-its place. `antiprior-on-macro` and `tier0-on-arm` are the two rows; the weights are on the
-`antiprior_on_s0c-weights` Release and re-hash identical to the trained files.
-
-```bash
-mkdir -p runs/myna-v0
-curl -L -o runs/myna-v0/model.pt       https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v0-checkpoint/model.pt
-curl -L -o runs/myna-v0/tokenizer.json https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v0-checkpoint/tokenizer.json
-make repro                             # 41/41 rows hold here, with weights to read
-```
-
-The V1-B weights go where `bench/diag_question_ablation.py` already looks by default, so Tier 0
-re-runs on the recovered checkpoint with no flag at all:
-
-```bash
-mkdir -p runs/v1b-kaggle-3600b
-curl -L -o runs/v1b-kaggle-3600b/model.pt       https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v1b-checkpoint/model.pt
-curl -L -o runs/v1b-kaggle-3600b/tokenizer.json https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v1b-checkpoint/tokenizer.json
-uv run python bench/diag_question_ablation.py   # guard green: 716 committed keys, macro 0.4893271976
-```
+**Weights are not in the tree.** `.gitignore` keeps `*.pt` out of git, and every published figure
+is backed by a committed JSON witness rather than by a binary. The checkpoints themselves are
+withheld from this artefact for anonymity. They are available to reviewers on request through the
+review forum: the v0 streaming checkpoint (16,926,848 params, `model.pt` sha256 `30f0fa93…`), the
+V1-B arm behind the 0.4893 macro, the P10 `off` control (67,733,781 B), and the v6 readout heads plus
+the DeBERTa-v3-large backbone (1.799 GB). Each ships with the sha256 that ties it to the committed
+witness, so a run can be verified byte for byte once the weights are in hand.
 
 ```python
 from myna import Myna
