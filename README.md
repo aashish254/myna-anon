@@ -23,6 +23,18 @@ decision models, and both re-encode the entire state on every request. Agent
 loops don't work that way — the state grows at the edge and the questions are
 short. Myna is an architecture built for that shape from the ground up.
 
+## Reviewer quick start (5 minutes, no GPU)
+
+1. `pip install -e .` from this directory.
+2. `make repro` — checks that every published figure still matches the committed witness in `runs/`.
+3. `make gates` — prints the seven release gates and the artifact each verdict rests on.
+4. To check the paper's headline table without loading a model, read `runs/paper_numbers.json`
+   (macro 0.8620), `runs/paired_bootstrap.json` (the intervals) and `runs/setfit_16cell.json`
+   (the SetFit baseline, 0.6455).
+
+The checkpoints are not shipped here; see *Weights* below. Every number in the paper has a JSON
+witness, so no model download is needed to audit the tables.
+
 ## Myna v6 Unified — the fine-tuned arm
 
 **What it is.** `microsoft/deberta-v3-large`, fine-tuned on `decision-v2-pilot`'s train split,
