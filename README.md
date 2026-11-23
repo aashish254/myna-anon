@@ -218,9 +218,15 @@ printed it.
 ## Quickstart: install, fetch the weights, ask one question
 
 ```bash
-pip install "git+https://anonymous.4open.science/r/myna-anon-DBC7.git"
+pip install -e .            # run from the root of this artefact
 myna-weights          # → ~/.cache/myna/antiprior_off_s0-weights/{model.pt,tokenizer.json}
 ```
+
+> **Weights are not shipped with this artefact.** `myna-weights` fetches release assets when they
+> are published; for review, the checkpoints are provided directly (see *Weights* below), and every
+> figure in the paper is backed by a committed JSON witness so the table can be checked without
+> loading a model.
+
 
 ```python
 from myna import Myna, fetch_weights
@@ -258,7 +264,7 @@ gh release download antiprior_off_s0-weights -D ~/.cache/myna/antiprior_off_s0-w
 ```
 
 Over HTTP, the server already ships (the extra is one install away:
-`pip install "myna[serve] @ git+https://anonymous.4open.science/r/myna-anon-DBC7.git"`):
+`pip install -e ".[serve]"`):
 
 ```bash
 myna-serve --ckpt ~/.cache/myna/antiprior_off_s0-weights --port 8080
