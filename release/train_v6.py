@@ -68,7 +68,11 @@ def gold_index(qtype: str, label, labels: list[str]) -> int:
     if qtype == "noul":
         return 1 if label else 0
     if qtype == "score":
-        return int(label) - 1
+        # The suite stores the score label as a 0-based index into `criteria` (0..4 for every
+        # score source), so it is already the class index. Subtracting one here is the retracted
+        # off-by-one in paper/MEASUREMENT-CORRECTION.md: it produced gold -1 and the
+        # "Target -1 is out of bounds" crash on the first label-0 score row.
+        return int(label)
     return labels.index(label)
 
 
@@ -97,9 +101,12 @@ class PackedSuite(Dataset):
                 seq, positions = renderer._packed_ids(prefix, state, options)
                 if not positions:
                     continue
+                gold = gold_index(spec["type"], spec.get("label"), labels)
+                assert 0 <= gold < len(options), (
+                    f"{source}/{qname}: gold {gold} outside 0..{len(options)-1}")
                 self.items.append({
                     "seq": seq, "positions": positions,
-                    "gold": gold_index(spec["type"], spec.get("label"), labels),
+                    "gold": gold,
                     "primitive": spec["type"],
                 })
 
@@ -130,7 +137,7 @@ def collate(batch: list[dict], pad_id: int = 0):
 def packed_logits(encoder, head, ids, attn, pos, valid):
     hs = encoder(input_ids=ids, attention_mask=attn).last_hidden_state
     b, k = pos.shape
-    gathered = hs[torch.arange(b).unsqueeze(1), pos]          # [B, K, d]
+    gathered = hs[torch.arange(b, device=hs.device).unsqueeze(1), pos]          # [B, K, d]
     logits = head(gathered).squeeze(-1)                        # [B, K]
     return logits.masked_fill(~valid, -1e4)
 
@@ -158,6 +165,7 @@ def main() -> None:
                                 SetAwareBankingHead, _readout)
 
     torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     backbone = REPO / "myna-v5-prototype 2" / "deberta-v5-finetuned"
     tokenizer = AutoTokenizer.from_pretrained(str(backbone))
     renderer = Renderer(tokenizer)
@@ -166,7 +174,12 @@ def main() -> None:
           f"skipped {train.skipped_high_k} with K > {args.max_k}", flush=True)
 
     encoder = AutoModel.from_pretrained(str(backbone))
+    encoder.gradient_checkpointing_enable()
+    encoder.enable_input_require_grads()
     head = _readout(1024, 512, 0.1)
+    encoder.to(device)
+    head.to(device)
+    print(f"device: {device}", flush=True)
     optim = torch.optim.AdamW([
         {"params": encoder.parameters(), "lr": args.lr_encoder},
         {"params": head.parameters(), "lr": args.lr_head},
@@ -184,6 +197,8 @@ def main() -> None:
         if cursor + args.batch > len(order):
             cursor = 0
         ids, attn, pos, valid, gold = collate(batch, pad_id=tokenizer.pad_token_id or 0)
+        ids, attn, pos, valid, gold = (ids.to(device), attn.to(device), pos.to(device),
+                                       valid.to(device), gold.to(device))
         logits = packed_logits(encoder, head, ids, attn, pos, valid)
         loss = F.cross_entropy(logits, gold)
         optim.zero_grad(set_to_none=True)
@@ -204,7 +219,8 @@ def main() -> None:
     q95 = {"choice": 0.5, "score": 0.5, "noul": 0.5}
     if args.fit_calibration:
         temperatures, q90, q95 = fit_calibration_split(
-            encoder, head, renderer, REPO / args.calibration, args.max_k, args.batch, args.cal_limit)
+            encoder, head, renderer, REPO / args.calibration, args.max_k, args.batch,
+            args.cal_limit, device)
         print("calibration:", temperatures, q90, q95)
 
     config = {
@@ -245,7 +261,8 @@ def main() -> None:
     print("packed_scorer reloads with strict=True", flush=True)
 
 
-def fit_calibration_split(encoder, head, renderer, path, max_k, batch_size, cal_limit=0):
+def fit_calibration_split(encoder, head, renderer, path, max_k, batch_size, cal_limit=0,
+                         device=None):
     """Per-primitive temperature and conformal quantiles on the calibration split."""
     ds = PackedSuite(path, renderer, limit=cal_limit, max_k=max_k)
     encoder.eval()
@@ -254,6 +271,9 @@ def fit_calibration_split(encoder, head, renderer, path, max_k, batch_size, cal_
         for start in range(0, len(ds), batch_size):
             chunk = [ds[i] for i in range(start, min(start + batch_size, len(ds)))]
             ids, attn, pos, valid, gold = collate(chunk, pad_id=0)
+            if device is not None:
+                ids, attn, pos, valid = (ids.to(device), attn.to(device),
+                                         pos.to(device), valid.to(device))
             logits = packed_logits(encoder, head, ids, attn, pos, valid)
             for j, item in enumerate(chunk):
                 raw.append((item["primitive"], logits[j, :len(item["positions"])].tolist(),

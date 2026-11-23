@@ -1,12 +1,76 @@
 {
  "cmd": "python -m bench.paired_bootstrap",
- "deberta_percell_seed42": {
-  "macro_myna": 0.8632,
-  "macro_arm": 0.7708,
-  "delta_macro": 0.069,
+ "B": 20000,
+ "seed": 20261104,
+ "baseline_files": [
+  "runs/baseline_seed13_2ep.json",
+  "runs/baseline_seed13_3ep.json",
+  "runs/baseline_seed21_3ep.json",
+  "runs/baseline_seed21_6ep.json",
+  "runs/baseline_seed42_1ep.json",
+  "runs/baseline_seed42_2ep.json",
+  "runs/baseline_seed7_1ep.json",
+  "runs/baseline_seed7_2ep.json",
+  "runs/baseline_seed7_3ep.json",
+  "runs/baseline_seed7_6ep.json"
+ ],
+ "deberta_percell_seed13_2ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.760417,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.788357,
+  "delta_macro": 0.07368,
   "ci95": [
-   0.0486,
-   0.0903
+   0.054,
+   0.0932
+  ],
+  "mcnemar": {
+   "myna_only": 204,
+   "arm_only": 56,
+   "p": "7.76e-20"
+  }
+ },
+ "deberta_percell_seed13_3ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.771528,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.792794,
+  "delta_macro": 0.069244,
+  "ci95": [
+   0.0498,
+   0.0889
+  ],
+  "mcnemar": {
+   "myna_only": 194,
+   "arm_only": 62,
+   "p": "2.67e-16"
+  }
+ },
+ "deberta_percell_seed21_3ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.772917,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.794666,
+  "delta_macro": 0.067371,
+  "ci95": [
+   0.0473,
+   0.0877
+  ],
+  "mcnemar": {
+   "myna_only": 197,
+   "arm_only": 67,
+   "p": "2.03e-15"
+  }
+ },
+ "deberta_percell_seed21_6ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.770833,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.793058,
+  "delta_macro": 0.068979,
+  "ci95": [
+   0.0483,
+   0.0898
   ],
   "mcnemar": {
    "myna_only": 197,
@@ -14,13 +78,111 @@
    "p": "3.07e-16"
   }
  },
- "laya_0419": {
-  "macro_myna": 0.8632,
-  "macro_arm": 0.6382,
-  "delta_macro": 0.1956,
+ "deberta_percell_seed42_1ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.58125,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.609671,
+  "delta_macro": 0.252367,
   "ci95": [
-   0.1692,
-   0.2219
+   0.2248,
+   0.2805
+  ],
+  "mcnemar": {
+   "myna_only": 444,
+   "arm_only": 38,
+   "p": "5.49e-76"
+  }
+ },
+ "deberta_percell_seed42_2ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.751389,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.774579,
+  "delta_macro": 0.087458,
+  "ci95": [
+   0.0676,
+   0.108
+  ],
+  "mcnemar": {
+   "myna_only": 215,
+   "arm_only": 54,
+   "p": "1.75e-22"
+  }
+ },
+ "deberta_percell_seed7_1ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.66875,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.698699,
+  "delta_macro": 0.163339,
+  "ci95": [
+   0.1406,
+   0.1858
+  ],
+  "mcnemar": {
+   "myna_only": 330,
+   "arm_only": 50,
+   "p": "1.83e-46"
+  }
+ },
+ "deberta_percell_seed7_2ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.75625,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.781282,
+  "delta_macro": 0.080756,
+  "ci95": [
+   0.0589,
+   0.1026
+  ],
+  "mcnemar": {
+   "myna_only": 217,
+   "arm_only": 63,
+   "p": "6.05e-20"
+  }
+ },
+ "deberta_percell_seed7_3ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.763889,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.786792,
+  "delta_macro": 0.075245,
+  "ci95": [
+   0.0562,
+   0.095
+  ],
+  "mcnemar": {
+   "myna_only": 199,
+   "arm_only": 56,
+   "p": "5.98e-19"
+  }
+ },
+ "deberta_percell_seed7_6ep": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.774306,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.796856,
+  "delta_macro": 0.065182,
+  "ci95": [
+   0.0457,
+   0.0847
+  ],
+  "mcnemar": {
+   "myna_only": 193,
+   "arm_only": 65,
+   "p": "2.64e-15"
+  }
+ },
+ "laya_0419": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.638194,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.666399,
+  "delta_macro": 0.195639,
+  "ci95": [
+   0.1697,
+   0.2212
   ],
   "mcnemar": {
    "myna_only": 391,
@@ -29,17 +191,97 @@
   }
  },
  "vegaml_0150": {
-  "macro_myna": 0.8632,
-  "macro_arm": 0.5833,
-  "delta_macro": 0.2461,
+  "overall_myna": 0.863194,
+  "overall_arm": 0.583333,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.61597,
+  "delta_macro": 0.246067,
   "ci95": [
-   0.2182,
-   0.275
+   0.217,
+   0.2745
   ],
   "mcnemar": {
    "myna_only": 478,
    "arm_only": 75,
    "p": "1.62e-65"
+  }
+ },
+ "tfidf_rebuild": {
+  "overall_myna": 0.863194,
+  "overall_arm": 0.625694,
+  "macro_myna": 0.862038,
+  "macro_arm": 0.662637,
+  "delta_macro": 0.199401,
+  "ci95": [
+   0.172,
+   0.2264
+  ],
+  "mcnemar": {
+   "myna_only": 406,
+   "arm_only": 64,
+   "p": "9.55e-56"
+  }
+ },
+ "per_cell": {
+  "deberta_percell_seed21_6ep": {
+   "dbpedia14/category": {
+    "delta": 0.2411,
+    "ci95": [
+     0.165,
+     0.3208
+    ]
+   },
+   "mnli/relation": {
+    "delta": 0.1475,
+    "ci95": [
+     0.0565,
+     0.2385
+    ]
+   },
+   "agnews/topic": {
+    "delta": 0.2154,
+    "ci95": [
+     0.1261,
+     0.3053
+    ]
+   },
+   "trec/answer_type": {
+    "delta": 0.2067,
+    "ci95": [
+     0.1275,
+     0.2887
+    ]
+   }
+  },
+  "deberta_percell_seed7_6ep": {
+   "dbpedia14/category": {
+    "delta": 0.2411,
+    "ci95": [
+     0.165,
+     0.3208
+    ]
+   },
+   "mnli/relation": {
+    "delta": 0.1561,
+    "ci95": [
+     0.0648,
+     0.2478
+    ]
+   },
+   "agnews/topic": {
+    "delta": 0.2065,
+    "ci95": [
+     0.1176,
+     0.2975
+    ]
+   },
+   "trec/answer_type": {
+    "delta": 0.2067,
+    "ci95": [
+     0.1275,
+     0.2887
+    ]
+   }
   }
  }
 }

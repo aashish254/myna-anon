@@ -81,6 +81,27 @@ def selective(recs: list[dict]) -> dict:
     return out
 
 
+def load_baseline(path: Path) -> dict:
+    """Loader for the baseline `records` schema (row_id / cell / ok), which differs from the
+    row-outcome schema above: no `type`, no `conf`, one record per question."""
+    d = json.loads(path.read_text())
+    cells = defaultdict(list)
+    rows = defaultdict(list)
+    for r in d["records"]:
+        ok = int(r["ok"])
+        cells[r["cell"]].append(ok)
+        rows[r["row_id"]].append(ok)
+    return {
+        "n_questions": sum(len(v) for v in cells.values()),
+        "n_rows": len(rows),
+        "macro": round(float(np.mean([np.mean(v) for v in cells.values()])), 6),
+        "overall": round(float(np.mean([x for v in cells.values() for x in v])), 6),
+        "bundle_exact": round(float(np.mean([all(v) for v in rows.values()])), 6),
+        "cells": {c: {"n": len(v), "acc": round(float(np.mean(v)), 6)}
+                  for c, v in sorted(cells.items())},
+    }
+
+
 def summarize(recs: list[dict]) -> dict:
     per_cell = defaultdict(list)
     per_type = defaultdict(list)
@@ -138,6 +159,14 @@ def main() -> None:
                              "bundle_exact": round(rec["bundle_exact"], 6),
                              "cells": {c: {"n": v["n"], "acc": round(v["acc"], 6)}
                                        for c, v in rec["cells"].items()}}
+
+    for name, rel in [("deberta_control_1ep_s42", "runs/baseline_seed42_1ep.json"),
+                      ("deberta_control_3ep_s13", "runs/baseline_seed13_3ep.json"),
+                      ("deberta_control_6ep_s21", "runs/baseline_seed21_6ep.json"),
+                      ("deberta_control_6ep_s7", "runs/baseline_seed7_6ep.json")]:
+        path = REPO / rel
+        if path.exists():
+            out["arms"][name] = load_baseline(path)
 
     (REPO / args.out).write_text(json.dumps(out, indent=1))
     lines = ["# Recomputed paper numbers", "",
