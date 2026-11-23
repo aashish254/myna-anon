@@ -18,7 +18,7 @@ documents — where the observation is scanned **once** and every later request
 only pays for what changed.
 
 Born from a year inside [laya](https://github.com/NandhaKishorM/laya) and
-[kev](https://github.com/aashish254/kev): both are non-autoregressive System-1
+kev: both are non-autoregressive System-1
 decision models, and both re-encode the entire state on every request. Agent
 loops don't work that way — the state grows at the edge and the questions are
 short. Myna is an architecture built for that shape from the ground up.
@@ -174,7 +174,7 @@ uv sync --extra v6      # transformers + safetensors + huggingface_hub
 ```python
 from myna import MynaV6
 myna = MynaV6("myna-v5-prototype 2")     # a local campaign directory — or:
-myna = MynaV6("Aashish254/myna-v6")      # the Hugging Face Hub repo id
+myna = MynaV6("<anonymous-checkpoint>")      # the Hugging Face Hub repo id
 out = myna.predict("Your card was declined at 3am and I have already travelled twice today.", {
     "refund": {"type": "noul", "instructions": "Is this a refund request?"},
     "severity": {"type": "score", "instructions": "How severe is it?",
@@ -206,7 +206,7 @@ header — and the four heads on top of it are another 50,499,775 bytes in `myna
 `scripts/upload_to_hf.py` puts both on the Hub in one command:
 
 ```bash
-uv run python scripts/upload_to_hf.py --ckpt-dir "myna-v5-prototype 2" --repo-id Aashish254/myna-v6 --dry-run
+uv run python scripts/upload_to_hf.py --ckpt-dir "myna-v5-prototype 2" --repo-id <anonymous-checkpoint> --dry-run
 ```
 
 That command prints **10 files / 1,799,177,588 B = 1.799 GB** and uploads nothing; §9.68(ix)
@@ -214,20 +214,11 @@ carries the whole verification battery this section rests on — suite, registry
 secret scan, live engine and the uploader's own dry run — with each figure as its instrument
 printed it.
 
-**It has now run for real.** [huggingface.co/Aashish254/myna-v6](https://huggingface.co/Aashish254/myna-v6)
-is public, and the Hub's own per-file sizes sum to **1,799,177,588 B** — every one of the 10 manifest
-files matches byte for byte, next to the generated card. Two things only the real run could show: the
-namespace is the Hugging Face username **`Aashish254`**, capitalised, and `create_repo` answers
-`403 … rights to create a model under the namespace "aashish254"` for the GitHub handle the brief
-quoted; and the card's `datasets:` frontmatter cited a Hub dataset that answers 401 under either
-spelling, because the frozen suite is `data/decision-v2-pilot/` committed in this repository. Both are
-fixed in the script, so `MynaV6("Aashish254/myna-v6")` is the documented load path and the card it
-ships names a source that exists.
 
 ## Quickstart: install, fetch the weights, ask one question
 
 ```bash
-pip install "git+https://github.com/aashish254/myna.git"
+pip install "git+https://anonymous.4open.science/r/myna-anon-DBC7.git"
 myna-weights          # → ~/.cache/myna/antiprior_off_s0-weights/{model.pt,tokenizer.json}
 ```
 
@@ -267,7 +258,7 @@ gh release download antiprior_off_s0-weights -D ~/.cache/myna/antiprior_off_s0-w
 ```
 
 Over HTTP, the server already ships (the extra is one install away:
-`pip install "myna[serve] @ git+https://github.com/aashish254/myna.git"`):
+`pip install "myna[serve] @ git+https://anonymous.4open.science/r/myna-anon-DBC7.git"`):
 
 ```bash
 myna-serve --ckpt ~/.cache/myna/antiprior_off_s0-weights --port 8080
@@ -310,7 +301,7 @@ measured, on the checkpoints the instruments do accept.
 
 | gate | verdict | what the committed artifact prints | what it does not claim |
 |---|---|---|---|
-| **G1** — Accuracy beats the witness | **met** | v6 re-scored on this box and read by the **unchanged** frozen instrument: `bench/v6_audit.py --split test --every 1` writes `runs/v6_test.metrics.json`, and `myna.report` prints `g1/pass: true` on its own arithmetic — **macro 0.8620375366903147** against the **0.70** target, majority floor **0.4330647953941198**, `margin_observed` **+0.4290** where **+0.15** is required — over 16 of 16 cells kept at n ≥ 30 with `dropped_cells: []`, `unmatched_sets: []` and `below_majority_floor: []` (`runs/v6_test.report.json`). `bench/significance.py` re-runs its row-clustered bootstrap on those same 1,176 rows against laya's row dump, and its point line — myna **0.8620**, floor **0.4331**, laya **0.6664**, gap **+0.1956** — has to agree with the report to 1e-9 before it prints an interval. All three of G1's claims survive their own interval: macro **0.8620 [0.8430, 0.8800]** (lower bound ≥ 0.70), margin **+0.4290 [0.3900, 0.4424]** (lower bound ≥ +0.15), and the paired gap **+0.1956 [0.1701, 0.2210]**, which excludes zero without a resample either — McNemar 391 against 67 over 458 discordant pairs, p = 1.05e-56 — at the same first-replicate digest `d45e5c018ee550da` as the laya and vegaml runs, so all three intervals come from one replicate set over one row order (`runs/significance_v6.md`). The published v6 column is **0.8583** — the 4-dp read of `test_audit/macro_acc`: **0.8582510184910809** in `runs/witness-v6-master-paper.json` — so the local arm is the higher of the two, not the flattering one. Still in the row, as the *before* number: `v1b-kaggle-3600b`'s committed report prints `"pass": false` for this gate — **0.4893 · floor 0.4331 · +0.0563** [0.0192, 0.0676], macro [0.4647, 0.5139], 0.211 short of 0.70 (§9.66) — with a dev tail that still gains **+0.0072** over its last 1,000 updates and 3,600 updates in 20,225 s on a T4. The zero-shot competitors on those same rows are laya 0.4.19 at **0.6664** [0.6439, 0.6888] and vegaml 0.15.0 at **0.6160** [0.5898, 0.6415], the latter scored forced-choice through its own 43.8% decline flag (§9.67); the untrained control measures **0.346 / 0.351**. | met on the level, on the frozen arithmetic, and on an artifact this box re-scored — and the four things it does not claim are the point of the verdict rather than its footnotes. (i) **The trunk is borrowed.** v6 is a fine-tuned `microsoft/deberta-v3-large`: 434,012,160 of its 446,631,182 params — 1.736 GB of `model.safetensors` — with 12,619,022 params of Myna readout on top. §2.3 makes that a headline condition, so what this gate certifies is the readout and the cardinality routing, not a from-scratch encoder. (ii) **The arm is in-domain.** v6 was fine-tuned on `decision-v2-pilot/train.jsonl`; every one of the 16 cells is inside its training distribution, while laya and vegaml are zero-shot on 14 of 16. The **+0.1956** over laya is a trained-versus-untrained gap and must not be read as a like-for-like win. (iii) **It is a different artifact from the one the rest of the table describes.** G2's ratios and G3's browser build are `runs/myna-v0` at 14,449,280 params, and v6 has no ONNX export at all. (iv) **One cell this box cannot stand behind**: `banking77/intent` `none_absent` is 0/12 here against the campaign's 7/12, because the open-set gate is reconstructed from tensor shapes with no training code in the tree (§9.68). (v) **The checkpoint is not in git**: `runs/` carries every witness these rows quote, and the 1.799 GB the commands load is the public Hub repo `Aashish254/myna-v6` (§9.68(ix)), so a clean checkout re-runs none of them without that download. What the verdict does *not* settle is dose — that question belonged to `v1b-kaggle-3600b`, whose tail slope §9.38 writes down; v6's checkpoint came from a Colab campaign whose notebook is not in this repo, so no command here re-derives its training run. The void pre-`385e06c` checkpoint's 0.338 is still deliberately not a row (§9.23). |
+| **G1** — Accuracy beats the witness | **met** | v6 re-scored on this box and read by the **unchanged** frozen instrument: `bench/v6_audit.py --split test --every 1` writes `runs/v6_test.metrics.json`, and `myna.report` prints `g1/pass: true` on its own arithmetic — **macro 0.8620375366903147** against the **0.70** target, majority floor **0.4330647953941198**, `margin_observed` **+0.4290** where **+0.15** is required — over 16 of 16 cells kept at n ≥ 30 with `dropped_cells: []`, `unmatched_sets: []` and `below_majority_floor: []` (`runs/v6_test.report.json`). `bench/significance.py` re-runs its row-clustered bootstrap on those same 1,176 rows against laya's row dump, and its point line — myna **0.8620**, floor **0.4331**, laya **0.6664**, gap **+0.1956** — has to agree with the report to 1e-9 before it prints an interval. All three of G1's claims survive their own interval: macro **0.8620 [0.8430, 0.8800]** (lower bound ≥ 0.70), margin **+0.4290 [0.3900, 0.4424]** (lower bound ≥ +0.15), and the paired gap **+0.1956 [0.1701, 0.2210]**, which excludes zero without a resample either — McNemar 391 against 67 over 458 discordant pairs, p = 1.05e-56 — at the same first-replicate digest `d45e5c018ee550da` as the laya and vegaml runs, so all three intervals come from one replicate set over one row order (`runs/significance_v6.md`). The published v6 column is **0.8583** — the 4-dp read of `test_audit/macro_acc`: **0.8582510184910809** in `runs/witness-v6-master-paper.json` — so the local arm is the higher of the two, not the flattering one. Still in the row, as the *before* number: `v1b-kaggle-3600b`'s committed report prints `"pass": false` for this gate — **0.4893 · floor 0.4331 · +0.0563** [0.0192, 0.0676], macro [0.4647, 0.5139], 0.211 short of 0.70 (§9.66) — with a dev tail that still gains **+0.0072** over its last 1,000 updates and 3,600 updates in 20,225 s on a T4. The zero-shot competitors on those same rows are laya 0.4.19 at **0.6664** [0.6439, 0.6888] and vegaml 0.15.0 at **0.6160** [0.5898, 0.6415], the latter scored forced-choice through its own 43.8% decline flag (§9.67); the untrained control measures **0.346 / 0.351**. | met on the level, on the frozen arithmetic, and on an artifact this box re-scored — and the four things it does not claim are the point of the verdict rather than its footnotes. (i) **The trunk is borrowed.** v6 is a fine-tuned `microsoft/deberta-v3-large`: 434,012,160 of its 446,631,182 params — 1.736 GB of `model.safetensors` — with 12,619,022 params of Myna readout on top. §2.3 makes that a headline condition, so what this gate certifies is the readout and the cardinality routing, not a from-scratch encoder. (ii) **The arm is in-domain.** v6 was fine-tuned on `decision-v2-pilot/train.jsonl`; every one of the 16 cells is inside its training distribution, while laya and vegaml are zero-shot on 14 of 16. The **+0.1956** over laya is a trained-versus-untrained gap and must not be read as a like-for-like win. (iii) **It is a different artifact from the one the rest of the table describes.** G2's ratios and G3's browser build are `runs/myna-v0` at 14,449,280 params, and v6 has no ONNX export at all. (iv) **One cell this box cannot stand behind**: `banking77/intent` `none_absent` is 0/12 here against the campaign's 7/12, because the open-set gate is reconstructed from tensor shapes with no training code in the tree (§9.68). (v) **The checkpoint is not in git**: `runs/` carries every witness these rows quote, and the 1.799 GB the commands load is the public Hub repo `<anonymous-checkpoint>` (§9.68(ix)), so a clean checkout re-runs none of them without that download. What the verdict does *not* settle is dose — that question belonged to `v1b-kaggle-3600b`, whose tail slope §9.38 writes down; v6's checkpoint came from a Colab campaign whose notebook is not in this repo, so no command here re-derives its training run. The void pre-`385e06c` checkpoint's 0.338 is still deliberately not a row (§9.23). |
 | **G2** — Latency claim survives equal-footing re-measurement | **met** | one M5 process, both engines fp32, `Agent.system_one` called directly, ladder capped inside laya's own 1024 window: **3.04×/3.21×/4.12×/3.60×** end-to-end and **6.78×/4.67×/4.75×/3.65×** ask-only at 1/5/10/50 questions, each cell the minimum of two committed runs. | met as a ratio, which is all G2 asks. It carries no accuracy implication, and now no accuracy *verdict* either: the faster engine is `runs/myna-v0` — 14,449,280 params against laya's 421,293,827 — which is the checkpoint that fails G1 and G5, not the one that clears them. G1 and G5 are met by v6, whose 446,631,182 params are 434,012,160 fine-tuned DeBERTa-v3-large encoder plus 12,619,022 of Myna readout, and that is a different artifact at 31× v0's parameter count and 1.736 GB of `model.safetensors`; this ratio was never measured on it (§9.69). The millisecond columns behind these ratios are load-dependent on a box other sessions share (§9.23) — quote the ratio, never the milliseconds. |
 | **G3** — Deployment works for real | **met** | the exported artifact answers three typed decisions in real Chrome 153 with the same probabilities the torch engine prints — 6/6 parity checks, both isolation modes, desktop and mobile widths — and its bytes, cold-load and p50 are measured there with the box's load average printed beside them. | met as a mechanics gate, and the caveat is part of the verdict rather than a footnote: what ships is v0 — `src/myna/onnx_export.py` exports that trunk and nothing else, so v6's G1 and G5 passes have no browser artifact behind them and the gate and the level are met by different weights (§9.69); the ≤ 20 MB int8 route is open on bytes and closed on agreement (§9.28); the Apple-silicon int8 route closes for the opposite reason — 17.40 MiB at 9.24e-03 and no latency win at all, so fp32 is the artifact on both paths (§9.29). |
 | **G4** — Long-context is *correct*, not just cheap | **not met** | v0's needle curve prints **0.188 at 128 tokens** against a 0.167 uniform floor — at chance on the *shortest* rung — so the longer rows are the decay of nothing, and `runs/needle_myna-v0.md` prints `G4: not measured by this run` in place of a table a reader could quote. v6 was offered to the same harness on this box and did not produce a curve at all: it stops inside needle construction, `bench/eval_needle.py` → `src/myna/longctx.py:69` → `src/myna/tokenizer.py:45`, which asks `tok.encode(...).ids` of an engine whose `tok` is an HF tokenizer that returns a plain list (`runs/needle_v6.log`, `AttributeError: 'list' object has no attribute 'ids'`, 4.35 s). That is the harness's assumption failing, not a long-context measurement, and no rung is being claimed from it. | not met, and no longer a run that has not happened. Two reasons this gate cannot be closed by the checkpoint that clears G1, and they are different: the harness is not v6-shaped (above), and the engine is not either — `MynaV6` takes `max_length: int = 512` and truncates the packed sequence to it (`src/myna/v6_engine.py:410`), and its backbone declares `max_position_embeddings: 512`, so a 4k *state* has no representation to be scored on rather than a bad score. Wiring the tokenizer shim would print a truncated-at-512 number against a 4k threshold, which is not this gate's measurement (§9.69). The 16k *state* is measured, fixed at 576 KiB and cheap (§9.22); the 16k *decision* has now been measured on this box too — the 4k truncated-backprop checkpoint ran its approved 1200-update dose on the M5 and prints **0.183 at 4096 and 0.150 at 16384** against these two thresholds (§9.63, `runs/needle_lc1_stageC_final.json`; the ladder is a registry row now — `needle-lc1-stageC`, witnessed by the committed replay pair `runs/needle_lc1_stageC_replay.{md,json}` — because the Stage C weights are in Release `lc1-4k-s0-stageC-weights` (id 428002663) and that row's command fetches them). So the `KAGGLE` label on 7b was stale and neither half of this gate is a compute question. What is not settled is the mechanism: the ladder at 799 and at 1199 updates is identical on every shared rung, so another dose at this regime is not the next experiment. |
@@ -987,15 +978,15 @@ which is the entry for the tick this repo's Actions tab had never once gone gree
 
 **Weights are not in the tree** — `.gitignore` keeps `*.pt` out, and G7's witness is the committed
 JSON, not a binary. The v0 checkpoint that ~20 registry rows read as `--ckpt runs/myna-v0` is
-therefore a [Release asset](https://github.com/aashish254/myna/releases/tag/v0-checkpoint), with its
+therefore a [Release asset](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/v0-checkpoint), with its
 sha256 and the re-run that ties it to `runs/risk_coverage.json` on the page. The V1-B weights behind
-the 0.4893 macro are **also** there now — [v1b-checkpoint](https://github.com/aashish254/myna/releases/tag/v1b-checkpoint),
+the 0.4893 macro are **also** there now — [v1b-checkpoint](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/v1b-checkpoint),
 recovered on 2026-10-01 from the Kaggle notebook's Output archive after §9.50 had recorded them as
 destroyed with `/private/tmp/kgwork`. The page carries the three hashes that tie those bytes to the
 committed Tier 0 witness (`model 0e73a8f07edc`, `tokenizer 0252c24627ee`, and a `metrics.json` that
 `cmp`s byte-identical to `runs/v1b_kaggle_3600b.metrics.json`), which is why "recovered" is a
 measurement here and not a hope. §9.53 is the entry. The `off` control of the P10 pair ships the same
-way — [antiprior_off_s0-weights](https://github.com/aashish254/myna/releases/tag/antiprior_off_s0-weights),
+way — [antiprior_off_s0-weights](https://anonymous.4open.science/r/myna-anon-DBC7/releases/tag/antiprior_off_s0-weights),
 `model.pt` 67,733,781 B at sha256 `30f0fa937e57e8ce…`, downloaded back and re-hashed on 2026-10-01 —
 and its title says **3,314 of 3,600 updates**, because the tag previously claimed the requested dose as
 if it were the achieved one (§9.54). That checkpoint is now ablated too, and what it says is the thing
@@ -1023,8 +1014,8 @@ its place. `antiprior-on-macro` and `tier0-on-arm` are the two rows; the weights
 
 ```bash
 mkdir -p runs/myna-v0
-curl -L -o runs/myna-v0/model.pt       https://github.com/aashish254/myna/releases/download/v0-checkpoint/model.pt
-curl -L -o runs/myna-v0/tokenizer.json https://github.com/aashish254/myna/releases/download/v0-checkpoint/tokenizer.json
+curl -L -o runs/myna-v0/model.pt       https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v0-checkpoint/model.pt
+curl -L -o runs/myna-v0/tokenizer.json https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v0-checkpoint/tokenizer.json
 make repro                             # 41/41 rows hold here, with weights to read
 ```
 
@@ -1033,8 +1024,8 @@ re-runs on the recovered checkpoint with no flag at all:
 
 ```bash
 mkdir -p runs/v1b-kaggle-3600b
-curl -L -o runs/v1b-kaggle-3600b/model.pt       https://github.com/aashish254/myna/releases/download/v1b-checkpoint/model.pt
-curl -L -o runs/v1b-kaggle-3600b/tokenizer.json https://github.com/aashish254/myna/releases/download/v1b-checkpoint/tokenizer.json
+curl -L -o runs/v1b-kaggle-3600b/model.pt       https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v1b-checkpoint/model.pt
+curl -L -o runs/v1b-kaggle-3600b/tokenizer.json https://anonymous.4open.science/r/myna-anon-DBC7/releases/download/v1b-checkpoint/tokenizer.json
 uv run python bench/diag_question_ablation.py   # guard green: 716 committed keys, macro 0.4893271976
 ```
 
@@ -1107,4 +1098,4 @@ abstention is a *routing* feature, not an accuracy one — it can decline to
 answer, it cannot answer a question the checkpoint never learned (§9.24).
 
 Apache-2.0 · research log in [PLAN.md](PLAN.md) · questions to
-[aashish254](https://github.com/aashish254)
+the authors
